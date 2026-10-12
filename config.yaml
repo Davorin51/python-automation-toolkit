@@ -1,0 +1,11 @@
+# All prices share one currency; this label never converts currencies.
+company_name: Northstar Demo Retail
+currency: EUR
+validation_policy: quarantine
+date_format: "%Y-%m-%d"
+csv_delimiter: ","
+csv_encoding: utf-8-sig
+excel_sheet: 0
+top_n: 10
+# Optional explicit source-header -> canonical-field mapping:
+column_mapping: {}

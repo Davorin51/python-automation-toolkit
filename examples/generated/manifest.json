@@ -1,0 +1,29 @@
+{
+  "version": "1.0.0",
+  "generated_at": "2026-10-12T22:29:51.477019+00:00",
+  "currency": "EUR",
+  "policy": "quarantine",
+  "input_rows": 357,
+  "accepted_rows": 350,
+  "invalid_rows": 7,
+  "excluded_rows": 7,
+  "rejected_files": [],
+  "total_revenue_cents": 24964198,
+  "orders": 174,
+  "order_basis": "distinct order_id",
+  "sources": [
+    {
+      "name": "sample_sales_dirty.csv",
+      "sha256": "0cf94053bcdc316b08f8a05b1308095e008378cd9b4a91e6cb08c2b18f3fdc9a"
+    }
+  ],
+  "outputs": [
+    "charts/categories.png",
+    "charts/comparison.png",
+    "charts/monthly.png",
+    "charts/products.png",
+    "sales_report.pdf",
+    "sales_report.xlsx",
+    "validation_errors.json"
+  ]
+}

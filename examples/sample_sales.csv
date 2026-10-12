@@ -1,0 +1,351 @@
+Date,Product,Category,Quantity,Unit Price,Order ID
+2026-01-08,Tea,Food & Drink,4,6.90,ORD-00001
+2026-01-08,Monitor,Electronics,5,249.50,ORD-00001
+2026-01-08,Desk,Furniture,7,299.00,ORD-00001
+2026-01-18,Headphones,Electronics,6,79.90,ORD-00002
+2026-01-18,Tea,Food & Drink,6,6.90,ORD-00002
+2026-01-13,Pen set,Office,2,7.90,ORD-00003
+2026-01-13,Laptop,Electronics,1,899.99,ORD-00003
+2026-01-18,Laptop,Electronics,3,899.99,ORD-00004
+2026-01-18,Coffee,Food & Drink,6,12.50,ORD-00004
+2026-01-20,Notebook,Office,4,4.50,ORD-00005
+2026-01-20,Coffee,Food & Drink,1,12.50,ORD-00005
+2026-01-15,Coffee,Food & Drink,1,12.50,ORD-00006
+2026-01-02,Headphones,Electronics,2,79.90,ORD-00007
+2026-01-06,Coffee,Food & Drink,7,12.50,ORD-00008
+2026-01-06,Laptop,Electronics,4,899.99,ORD-00008
+2026-01-06,Pen set,Office,6,7.90,ORD-00008
+2026-01-04,Tea,Food & Drink,6,6.90,ORD-00009
+2026-01-04,Monitor,Electronics,8,249.50,ORD-00009
+2026-02-16,Tea,Food & Drink,8,6.90,ORD-00010
+2026-02-21,Pen set,Office,1,7.90,ORD-00011
+2026-02-16,Desk lamp,Accessories,5,29.00,ORD-00012
+2026-02-16,Tea,Food & Drink,8,6.90,ORD-00012
+2026-02-16,Mouse,Electronics,1,24.90,ORD-00012
+2026-02-11,Tea,Food & Drink,7,6.90,ORD-00013
+2026-02-11,Mouse,Electronics,5,24.90,ORD-00013
+2026-02-08,Coffee,Food & Drink,4,12.50,ORD-00014
+2026-02-08,Backpack,Accessories,1,39.90,ORD-00014
+2026-02-08,Headphones,Electronics,6,79.90,ORD-00014
+2026-02-15,Tea,Food & Drink,8,6.90,ORD-00015
+2026-02-15,Desk lamp,Accessories,4,29.00,ORD-00015
+2026-02-18,Headphones,Electronics,5,79.90,ORD-00016
+2026-02-18,Chair,Furniture,8,149.00,ORD-00016
+2026-02-25,Tea,Food & Drink,7,6.90,ORD-00017
+2026-02-26,Mouse,Electronics,5,24.90,ORD-00018
+2026-02-15,Laptop,Electronics,7,899.99,ORD-00019
+2026-02-15,Desk lamp,Accessories,2,29.00,ORD-00019
+2026-02-15,Monitor,Electronics,5,249.50,ORD-00019
+2026-03-19,Backpack,Accessories,8,39.90,ORD-00020
+2026-03-19,Desk lamp,Accessories,8,29.00,ORD-00020
+2026-03-19,Coffee,Food & Drink,7,12.50,ORD-00020
+2026-03-01,Headphones,Electronics,7,79.90,ORD-00021
+2026-03-01,Chair,Furniture,7,149.00,ORD-00021
+2026-03-01,Monitor,Electronics,7,249.50,ORD-00021
+2026-03-11,Pen set,Office,6,7.90,ORD-00022
+2026-03-11,Backpack,Accessories,8,39.90,ORD-00022
+2026-03-14,Headphones,Electronics,8,79.90,ORD-00023
+2026-03-14,Backpack,Accessories,2,39.90,ORD-00023
+2026-03-14,Notebook,Office,1,4.50,ORD-00023
+2026-03-05,Desk,Furniture,5,299.00,ORD-00024
+2026-03-05,Pen set,Office,1,7.90,ORD-00024
+2026-03-13,Notebook,Office,5,4.50,ORD-00025
+2026-03-13,Laptop,Electronics,1,899.99,ORD-00025
+2026-03-13,Tea,Food & Drink,6,6.90,ORD-00025
+2026-03-25,Chair,Furniture,8,149.00,ORD-00026
+2026-03-03,Coffee,Food & Drink,3,12.50,ORD-00027
+2026-03-03,Tea,Food & Drink,6,6.90,ORD-00027
+2026-03-03,Desk lamp,Accessories,5,29.00,ORD-00027
+2026-03-03,Coffee,Food & Drink,1,12.50,ORD-00028
+2026-03-03,Tea,Food & Drink,4,6.90,ORD-00028
+2026-03-03,Backpack,Accessories,7,39.90,ORD-00028
+2026-03-06,Mouse,Electronics,3,24.90,ORD-00029
+2026-03-06,Backpack,Accessories,8,39.90,ORD-00029
+2026-03-06,Laptop,Electronics,3,899.99,ORD-00029
+2026-03-05,Tea,Food & Drink,4,6.90,ORD-00030
+2026-03-05,Pen set,Office,8,7.90,ORD-00030
+2026-03-05,Desk lamp,Accessories,1,29.00,ORD-00030
+2026-04-28,Coffee,Food & Drink,2,12.50,ORD-00031
+2026-04-28,Pen set,Office,1,7.90,ORD-00031
+2026-04-04,Tea,Food & Drink,4,6.90,ORD-00032
+2026-04-04,Mouse,Electronics,3,24.90,ORD-00032
+2026-04-21,Backpack,Accessories,4,39.90,ORD-00033
+2026-04-25,Notebook,Office,8,4.50,ORD-00034
+2026-04-25,Desk,Furniture,4,299.00,ORD-00034
+2026-04-03,Mouse,Electronics,4,24.90,ORD-00035
+2026-04-03,Coffee,Food & Drink,3,12.50,ORD-00035
+2026-04-03,Tea,Food & Drink,7,6.90,ORD-00035
+2026-04-07,Desk,Furniture,2,299.00,ORD-00036
+2026-04-07,Mouse,Electronics,8,24.90,ORD-00036
+2026-04-07,Monitor,Electronics,8,249.50,ORD-00036
+2026-04-17,Laptop,Electronics,4,899.99,ORD-00037
+2026-04-01,Chair,Furniture,2,149.00,ORD-00038
+2026-04-01,Headphones,Electronics,3,79.90,ORD-00038
+2026-04-17,Chair,Furniture,1,149.00,ORD-00039
+2026-04-17,Mouse,Electronics,3,24.90,ORD-00039
+2026-04-17,Monitor,Electronics,1,249.50,ORD-00039
+2026-04-16,Notebook,Office,7,4.50,ORD-00040
+2026-04-16,Mouse,Electronics,5,24.90,ORD-00040
+2026-04-16,Desk lamp,Accessories,1,29.00,ORD-00040
+2026-04-21,Pen set,Office,1,7.90,ORD-00041
+2026-04-21,Notebook,Office,8,4.50,ORD-00041
+2026-04-21,Backpack,Accessories,3,39.90,ORD-00041
+2026-04-02,Chair,Furniture,8,149.00,ORD-00042
+2026-05-11,Headphones,Electronics,1,79.90,ORD-00043
+2026-05-14,Notebook,Office,8,4.50,ORD-00044
+2026-05-14,Desk,Furniture,2,299.00,ORD-00044
+2026-05-14,Headphones,Electronics,7,79.90,ORD-00044
+2026-05-16,Chair,Furniture,1,149.00,ORD-00045
+2026-05-22,Laptop,Electronics,8,899.99,ORD-00046
+2026-05-13,Tea,Food & Drink,8,6.90,ORD-00047
+2026-05-13,Monitor,Electronics,8,249.50,ORD-00047
+2026-05-13,Desk lamp,Accessories,2,29.00,ORD-00047
+2026-05-25,Headphones,Electronics,2,79.90,ORD-00048
+2026-05-25,Pen set,Office,1,7.90,ORD-00048
+2026-05-25,Chair,Furniture,3,149.00,ORD-00048
+2026-05-13,Chair,Furniture,6,149.00,ORD-00049
+2026-05-13,Coffee,Food & Drink,5,12.50,ORD-00049
+2026-05-13,Desk,Furniture,8,299.00,ORD-00049
+2026-05-21,Laptop,Electronics,4,899.99,ORD-00050
+2026-05-04,Monitor,Electronics,6,249.50,ORD-00051
+2026-05-04,Laptop,Electronics,4,899.99,ORD-00051
+2026-05-06,Chair,Furniture,4,149.00,ORD-00052
+2026-05-06,Notebook,Office,7,4.50,ORD-00052
+2026-05-06,Desk,Furniture,2,299.00,ORD-00052
+2026-05-13,Desk lamp,Accessories,1,29.00,ORD-00053
+2026-05-13,Notebook,Office,5,4.50,ORD-00053
+2026-05-13,Chair,Furniture,4,149.00,ORD-00053
+2026-05-02,Chair,Furniture,3,149.00,ORD-00054
+2026-05-11,Mouse,Electronics,8,24.90,ORD-00055
+2026-05-11,Tea,Food & Drink,5,6.90,ORD-00055
+2026-05-11,Headphones,Electronics,1,79.90,ORD-00055
+2026-06-15,Backpack,Accessories,3,39.90,ORD-00056
+2026-06-23,Desk,Furniture,5,299.00,ORD-00057
+2026-06-14,Desk,Furniture,6,299.00,ORD-00058
+2026-06-14,Desk lamp,Accessories,4,29.00,ORD-00058
+2026-06-01,Coffee,Food & Drink,1,12.50,ORD-00059
+2026-06-01,Tea,Food & Drink,5,6.90,ORD-00059
+2026-06-01,Laptop,Electronics,5,899.99,ORD-00059
+2026-06-24,Chair,Furniture,4,149.00,ORD-00060
+2026-06-24,Headphones,Electronics,5,79.90,ORD-00060
+2026-06-24,Laptop,Electronics,5,899.99,ORD-00060
+2026-06-09,Chair,Furniture,1,149.00,ORD-00061
+2026-06-09,Pen set,Office,6,7.90,ORD-00061
+2026-06-09,Desk lamp,Accessories,8,29.00,ORD-00061
+2026-06-06,Backpack,Accessories,7,39.90,ORD-00062
+2026-06-05,Notebook,Office,2,4.50,ORD-00063
+2026-06-05,Desk,Furniture,5,299.00,ORD-00063
+2026-06-05,Desk lamp,Accessories,3,29.00,ORD-00063
+2026-06-22,Chair,Furniture,1,149.00,ORD-00064
+2026-06-22,Coffee,Food & Drink,1,12.50,ORD-00064
+2026-06-03,Backpack,Accessories,8,39.90,ORD-00065
+2026-06-25,Desk lamp,Accessories,5,29.00,ORD-00066
+2026-06-25,Notebook,Office,8,4.50,ORD-00066
+2026-06-23,Monitor,Electronics,2,249.50,ORD-00067
+2026-06-23,Desk,Furniture,7,299.00,ORD-00067
+2026-06-27,Chair,Furniture,6,149.00,ORD-00068
+2026-06-27,Notebook,Office,3,4.50,ORD-00068
+2026-06-23,Desk,Furniture,2,299.00,ORD-00069
+2026-06-23,Notebook,Office,4,4.50,ORD-00069
+2026-06-23,Tea,Food & Drink,4,6.90,ORD-00069
+2026-07-01,Mouse,Electronics,5,24.90,ORD-00070
+2026-07-01,Backpack,Accessories,6,39.90,ORD-00070
+2026-07-01,Notebook,Office,7,4.50,ORD-00070
+2026-07-21,Notebook,Office,3,4.50,ORD-00071
+2026-07-24,Tea,Food & Drink,6,6.90,ORD-00072
+2026-07-17,Headphones,Electronics,4,79.90,ORD-00073
+2026-07-17,Mouse,Electronics,8,24.90,ORD-00073
+2026-07-17,Backpack,Accessories,8,39.90,ORD-00073
+2026-07-10,Tea,Food & Drink,6,6.90,ORD-00074
+2026-07-13,Notebook,Office,4,4.50,ORD-00075
+2026-07-11,Monitor,Electronics,8,249.50,ORD-00076
+2026-07-27,Tea,Food & Drink,2,6.90,ORD-00077
+2026-07-27,Mouse,Electronics,6,24.90,ORD-00077
+2026-07-19,Desk,Furniture,8,299.00,ORD-00078
+2026-07-19,Pen set,Office,3,7.90,ORD-00078
+2026-07-19,Tea,Food & Drink,6,6.90,ORD-00078
+2026-07-26,Tea,Food & Drink,2,6.90,ORD-00079
+2026-07-19,Chair,Furniture,7,149.00,ORD-00080
+2026-07-19,Desk,Furniture,8,299.00,ORD-00080
+2026-07-07,Desk,Furniture,6,299.00,ORD-00081
+2026-07-01,Coffee,Food & Drink,6,12.50,ORD-00082
+2026-07-01,Monitor,Electronics,1,249.50,ORD-00082
+2026-07-01,Chair,Furniture,6,149.00,ORD-00082
+2026-07-13,Laptop,Electronics,4,899.99,ORD-00083
+2026-07-13,Headphones,Electronics,7,79.90,ORD-00083
+2026-07-13,Laptop,Electronics,7,899.99,ORD-00084
+2026-08-24,Desk,Furniture,1,299.00,ORD-00085
+2026-08-25,Notebook,Office,5,4.50,ORD-00086
+2026-08-25,Desk,Furniture,1,299.00,ORD-00086
+2026-08-18,Coffee,Food & Drink,1,12.50,ORD-00087
+2026-08-18,Headphones,Electronics,4,79.90,ORD-00087
+2026-08-19,Monitor,Electronics,8,249.50,ORD-00088
+2026-08-19,Desk,Furniture,8,299.00,ORD-00088
+2026-08-19,Backpack,Accessories,3,39.90,ORD-00088
+2026-08-13,Headphones,Electronics,4,79.90,ORD-00089
+2026-08-13,Laptop,Electronics,4,899.99,ORD-00089
+2026-08-08,Tea,Food & Drink,7,6.90,ORD-00090
+2026-08-08,Desk lamp,Accessories,4,29.00,ORD-00090
+2026-08-21,Chair,Furniture,5,149.00,ORD-00091
+2026-08-21,Mouse,Electronics,1,24.90,ORD-00091
+2026-08-22,Mouse,Electronics,1,24.90,ORD-00092
+2026-08-24,Pen set,Office,1,7.90,ORD-00093
+2026-08-24,Mouse,Electronics,2,24.90,ORD-00093
+2026-08-24,Chair,Furniture,1,149.00,ORD-00093
+2026-08-21,Notebook,Office,7,4.50,ORD-00094
+2026-08-21,Mouse,Electronics,5,24.90,ORD-00094
+2026-08-14,Tea,Food & Drink,2,6.90,ORD-00095
+2026-08-14,Monitor,Electronics,8,249.50,ORD-00096
+2026-08-14,Chair,Furniture,2,149.00,ORD-00096
+2026-08-12,Headphones,Electronics,6,79.90,ORD-00097
+2026-08-03,Tea,Food & Drink,4,6.90,ORD-00098
+2026-08-03,Backpack,Accessories,3,39.90,ORD-00098
+2026-08-04,Laptop,Electronics,2,899.99,ORD-00099
+2026-08-26,Chair,Furniture,6,149.00,ORD-00100
+2026-08-26,Coffee,Food & Drink,6,12.50,ORD-00100
+2026-09-28,Pen set,Office,7,7.90,ORD-00101
+2026-09-09,Desk lamp,Accessories,2,29.00,ORD-00102
+2026-09-09,Desk,Furniture,6,299.00,ORD-00102
+2026-09-20,Pen set,Office,1,7.90,ORD-00103
+2026-09-20,Chair,Furniture,7,149.00,ORD-00103
+2026-09-27,Laptop,Electronics,2,899.99,ORD-00104
+2026-09-27,Backpack,Accessories,5,39.90,ORD-00104
+2026-09-19,Mouse,Electronics,7,24.90,ORD-00105
+2026-09-19,Coffee,Food & Drink,2,12.50,ORD-00105
+2026-09-04,Backpack,Accessories,5,39.90,ORD-00106
+2026-09-14,Desk,Furniture,5,299.00,ORD-00107
+2026-09-14,Chair,Furniture,7,149.00,ORD-00107
+2026-09-14,Mouse,Electronics,4,24.90,ORD-00107
+2026-09-05,Monitor,Electronics,5,249.50,ORD-00108
+2026-09-05,Laptop,Electronics,7,899.99,ORD-00108
+2026-09-05,Notebook,Office,6,4.50,ORD-00108
+2026-09-03,Chair,Furniture,2,149.00,ORD-00109
+2026-09-03,Coffee,Food & Drink,4,12.50,ORD-00109
+2026-09-24,Notebook,Office,8,4.50,ORD-00110
+2026-09-24,Monitor,Electronics,6,249.50,ORD-00110
+2026-09-20,Backpack,Accessories,3,39.90,ORD-00111
+2026-09-01,Notebook,Office,2,4.50,ORD-00112
+2026-09-26,Headphones,Electronics,3,79.90,ORD-00113
+2026-09-26,Pen set,Office,4,7.90,ORD-00113
+2026-09-26,Desk,Furniture,6,299.00,ORD-00113
+2026-09-05,Laptop,Electronics,4,899.99,ORD-00114
+2026-09-28,Chair,Furniture,5,149.00,ORD-00115
+2026-09-28,Desk lamp,Accessories,8,29.00,ORD-00115
+2026-09-28,Tea,Food & Drink,1,6.90,ORD-00115
+2026-09-08,Desk lamp,Accessories,1,29.00,ORD-00116
+2026-09-08,Pen set,Office,6,7.90,ORD-00116
+2026-09-09,Tea,Food & Drink,2,6.90,ORD-00117
+2026-10-20,Pen set,Office,7,7.90,ORD-00118
+2026-10-20,Tea,Food & Drink,1,6.90,ORD-00118
+2026-10-20,Backpack,Accessories,1,39.90,ORD-00118
+2026-10-14,Desk lamp,Accessories,4,29.00,ORD-00119
+2026-10-14,Coffee,Food & Drink,4,12.50,ORD-00119
+2026-10-14,Pen set,Office,1,7.90,ORD-00119
+2026-10-16,Desk lamp,Accessories,1,29.00,ORD-00120
+2026-10-16,Backpack,Accessories,2,39.90,ORD-00120
+2026-10-16,Coffee,Food & Drink,8,12.50,ORD-00120
+2026-10-11,Desk,Furniture,1,299.00,ORD-00121
+2026-10-22,Chair,Furniture,7,149.00,ORD-00122
+2026-10-25,Mouse,Electronics,2,24.90,ORD-00123
+2026-10-08,Coffee,Food & Drink,2,12.50,ORD-00124
+2026-10-15,Laptop,Electronics,4,899.99,ORD-00125
+2026-10-15,Headphones,Electronics,7,79.90,ORD-00125
+2026-10-15,Monitor,Electronics,8,249.50,ORD-00125
+2026-10-06,Pen set,Office,2,7.90,ORD-00126
+2026-10-21,Chair,Furniture,1,149.00,ORD-00127
+2026-10-21,Pen set,Office,2,7.90,ORD-00127
+2026-10-21,Headphones,Electronics,5,79.90,ORD-00127
+2026-10-20,Chair,Furniture,7,149.00,ORD-00128
+2026-10-20,Laptop,Electronics,8,899.99,ORD-00128
+2026-10-20,Tea,Food & Drink,6,6.90,ORD-00128
+2026-10-27,Headphones,Electronics,1,79.90,ORD-00129
+2026-10-19,Backpack,Accessories,6,39.90,ORD-00130
+2026-10-19,Monitor,Electronics,1,249.50,ORD-00130
+2026-10-19,Notebook,Office,7,4.50,ORD-00130
+2026-10-18,Chair,Furniture,8,149.00,ORD-00131
+2026-10-11,Backpack,Accessories,4,39.90,ORD-00132
+2026-10-11,Chair,Furniture,5,149.00,ORD-00132
+2026-10-17,Desk lamp,Accessories,7,29.00,ORD-00133
+2026-10-17,Desk,Furniture,5,299.00,ORD-00133
+2026-10-17,Monitor,Electronics,7,249.50,ORD-00133
+2026-10-14,Backpack,Accessories,4,39.90,ORD-00134
+2026-10-21,Mouse,Electronics,1,24.90,ORD-00135
+2026-10-21,Headphones,Electronics,4,79.90,ORD-00135
+2026-11-08,Coffee,Food & Drink,3,12.50,ORD-00136
+2026-11-08,Headphones,Electronics,4,79.90,ORD-00136
+2026-11-08,Laptop,Electronics,5,899.99,ORD-00136
+2026-11-01,Headphones,Electronics,5,79.90,ORD-00137
+2026-11-09,Notebook,Office,3,4.50,ORD-00138
+2026-11-09,Headphones,Electronics,1,79.90,ORD-00138
+2026-11-15,Laptop,Electronics,8,899.99,ORD-00139
+2026-11-15,Headphones,Electronics,4,79.90,ORD-00139
+2026-11-23,Coffee,Food & Drink,4,12.50,ORD-00140
+2026-11-23,Chair,Furniture,1,149.00,ORD-00140
+2026-11-23,Headphones,Electronics,3,79.90,ORD-00140
+2026-11-02,Notebook,Office,5,4.50,ORD-00141
+2026-11-05,Desk,Furniture,2,299.00,ORD-00142
+2026-11-15,Mouse,Electronics,7,24.90,ORD-00143
+2026-11-15,Backpack,Accessories,1,39.90,ORD-00143
+2026-11-15,Laptop,Electronics,6,899.99,ORD-00143
+2026-11-02,Chair,Furniture,3,149.00,ORD-00144
+2026-11-02,Backpack,Accessories,8,39.90,ORD-00144
+2026-11-02,Coffee,Food & Drink,6,12.50,ORD-00144
+2026-11-26,Headphones,Electronics,5,79.90,ORD-00145
+2026-11-26,Coffee,Food & Drink,3,12.50,ORD-00145
+2026-11-17,Tea,Food & Drink,7,6.90,ORD-00146
+2026-11-17,Notebook,Office,7,4.50,ORD-00146
+2026-11-12,Monitor,Electronics,6,249.50,ORD-00147
+2026-11-12,Coffee,Food & Drink,3,12.50,ORD-00147
+2026-11-25,Chair,Furniture,1,149.00,ORD-00148
+2026-11-14,Desk,Furniture,7,299.00,ORD-00149
+2026-11-14,Chair,Furniture,4,149.00,ORD-00149
+2026-11-14,Coffee,Food & Drink,1,12.50,ORD-00149
+2026-11-18,Desk,Furniture,3,299.00,ORD-00150
+2026-11-18,Coffee,Food & Drink,5,12.50,ORD-00150
+2026-11-03,Headphones,Electronics,4,79.90,ORD-00151
+2026-11-03,Notebook,Office,7,4.50,ORD-00151
+2026-11-03,Desk lamp,Accessories,1,29.00,ORD-00151
+2026-11-22,Headphones,Electronics,8,79.90,ORD-00152
+2026-11-22,Pen set,Office,1,7.90,ORD-00152
+2026-11-16,Headphones,Electronics,5,79.90,ORD-00153
+2026-11-16,Coffee,Food & Drink,4,12.50,ORD-00153
+2026-11-19,Mouse,Electronics,2,24.90,ORD-00154
+2026-11-19,Monitor,Electronics,3,249.50,ORD-00154
+2026-12-23,Coffee,Food & Drink,7,12.50,ORD-00155
+2026-12-20,Pen set,Office,3,7.90,ORD-00156
+2026-12-20,Monitor,Electronics,4,249.50,ORD-00156
+2026-12-20,Laptop,Electronics,6,899.99,ORD-00156
+2026-12-02,Desk lamp,Accessories,8,29.00,ORD-00157
+2026-12-02,Tea,Food & Drink,5,6.90,ORD-00157
+2026-12-02,Coffee,Food & Drink,2,12.50,ORD-00157
+2026-12-23,Laptop,Electronics,7,899.99,ORD-00158
+2026-12-23,Desk lamp,Accessories,5,29.00,ORD-00158
+2026-12-26,Mouse,Electronics,5,24.90,ORD-00159
+2026-12-26,Pen set,Office,1,7.90,ORD-00159
+2026-12-01,Coffee,Food & Drink,5,12.50,ORD-00160
+2026-12-05,Laptop,Electronics,2,899.99,ORD-00161
+2026-12-09,Mouse,Electronics,1,24.90,ORD-00162
+2026-12-09,Pen set,Office,5,7.90,ORD-00162
+2026-12-21,Monitor,Electronics,8,249.50,ORD-00163
+2026-12-21,Coffee,Food & Drink,2,12.50,ORD-00163
+2026-12-21,Pen set,Office,1,7.90,ORD-00163
+2026-12-02,Chair,Furniture,5,149.00,ORD-00164
+2026-12-02,Desk lamp,Accessories,4,29.00,ORD-00164
+2026-12-23,Laptop,Electronics,3,899.99,ORD-00165
+2026-12-28,Laptop,Electronics,6,899.99,ORD-00166
+2026-12-28,Notebook,Office,5,4.50,ORD-00166
+2026-12-08,Laptop,Electronics,8,899.99,ORD-00167
+2026-12-08,Mouse,Electronics,3,24.90,ORD-00167
+2026-12-25,Tea,Food & Drink,7,6.90,ORD-00168
+2026-12-25,Notebook,Office,8,4.50,ORD-00168
+2026-12-10,Headphones,Electronics,2,79.90,ORD-00169
+2026-12-10,Coffee,Food & Drink,3,12.50,ORD-00169
+2026-12-10,Backpack,Accessories,5,39.90,ORD-00169
+2026-12-12,Chair,Furniture,6,149.00,ORD-00170
+2026-12-11,Pen set,Office,8,7.90,ORD-00171
+2026-12-03,Monitor,Electronics,7,249.50,ORD-00172
+2026-12-03,Desk lamp,Accessories,1,29.00,ORD-00172
+2026-12-13,Desk,Furniture,5,299.00,ORD-00173
+2026-12-13,Backpack,Accessories,7,39.90,ORD-00173
+2026-12-24,Desk,Furniture,3,299.00,ORD-00174
+2026-12-24,Monitor,Electronics,2,249.50,ORD-00174

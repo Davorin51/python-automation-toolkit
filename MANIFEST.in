@@ -1,0 +1,4 @@
+include config.yaml CHANGELOG.md CONTRIBUTING.md
+recursive-include examples *.csv *.xlsx *.json *.pdf *.png
+recursive-include docs *.md *.json *.png
+recursive-include scripts *.py

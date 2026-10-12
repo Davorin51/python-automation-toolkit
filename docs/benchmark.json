@@ -1,0 +1,11 @@
+{
+  "python": "3.12.14",
+  "platform": "Linux",
+  "architecture": "x86_64",
+  "rows": 100000,
+  "format": "all",
+  "core_seconds": 1.593,
+  "full_pipeline_seconds": 49.022,
+  "output_bytes": 4640421,
+  "method": "One CSV run; core measured first; full run rereads the same file. Generation of input data excluded. Wall-clock time; no memory measurement."
+}

@@ -1,0 +1,79 @@
+[
+  {
+    "source_file":"examples\/sample_sales_dirty.csv",
+    "source_row":352,
+    "date":"2026-02-30",
+    "product":"Laptop",
+    "category":"Electronics",
+    "quantity":"1",
+    "unit_price":"899.99",
+    "order_id":"BAD-1",
+    "reason":"Invalid date"
+  },
+  {
+    "source_file":"examples\/sample_sales_dirty.csv",
+    "source_row":353,
+    "date":"2026-03-01",
+    "product":"Desk",
+    "category":"Furniture",
+    "quantity":"-2",
+    "unit_price":"299.00",
+    "order_id":"BAD-2",
+    "reason":"Quantity must be a positive integer <= 1000000"
+  },
+  {
+    "source_file":"examples\/sample_sales_dirty.csv",
+    "source_row":354,
+    "date":"2026-04-01",
+    "product":"Mouse",
+    "category":"Electronics",
+    "quantity":"1",
+    "unit_price":"",
+    "order_id":"BAD-3",
+    "reason":"Price must be non-negative with at most two decimal places"
+  },
+  {
+    "source_file":"examples\/sample_sales_dirty.csv",
+    "source_row":355,
+    "date":"2026-05-01",
+    "product":"",
+    "category":"Office",
+    "quantity":"1",
+    "unit_price":"4.50",
+    "order_id":"BAD-4",
+    "reason":"Missing product"
+  },
+  {
+    "source_file":"examples\/sample_sales_dirty.csv",
+    "source_row":356,
+    "date":"2026-06-01",
+    "product":"Tea",
+    "category":"Food & Drink",
+    "quantity":"1",
+    "unit_price":"6.901",
+    "order_id":"BAD-5",
+    "reason":"Price must be non-negative with at most two decimal places"
+  },
+  {
+    "source_file":"examples\/sample_sales_dirty.csv",
+    "source_row":357,
+    "date":"2026-01-08",
+    "product":"Tea",
+    "category":"Food & Drink",
+    "quantity":"4",
+    "unit_price":"6.90",
+    "order_id":"ORD-00001",
+    "reason":"Duplicate transaction line"
+  },
+  {
+    "source_file":"examples\/sample_sales_dirty.csv",
+    "source_row":358,
+    "date":"2026-01-08",
+    "product":"Monitor",
+    "category":"Electronics",
+    "quantity":"5",
+    "unit_price":"249.50",
+    "order_id":"ORD-00001",
+    "reason":"Duplicate transaction line"
+  }
+]
