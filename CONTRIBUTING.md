@@ -1,6 +1,8 @@
 # Contributing
 
 Install the development dependencies with `python -m pip install -e '.[dev]'`.
+A plain `pip install -e .` only installs the runtime dependencies; the tests also
+need `pypdf`, which comes with the `test` extra (`.[test]`) and with `.[dev]`.
 Before submitting a change, run:
 
 ```bash

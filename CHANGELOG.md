@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add a `test` extra (pytest, pytest-cov, pypdf) that the `dev` extra builds on,
+  and fail test collection with a clear install hint when `pypdf` is missing.
+- Document that a plain `pip install -e .` does not include the test dependencies.
+
 ## 1.0.0 - 2026-10-12
 
 - Add CSV/XLSX ingestion, header aliases and explicit column mapping.

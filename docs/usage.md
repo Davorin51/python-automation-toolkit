@@ -10,9 +10,13 @@ python -m venv .venv
 source .venv/bin/activate
 # Windows PowerShell instead:
 # .venv\Scripts\Activate.ps1
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev]'   # or plain `-e .` if you only need the CLI
 python -m automation_toolkit --input examples/sample_sales.csv --output reports --format all --config config.yaml
 ```
+
+Running `pytest` requires the `test` extra (`pip install -e '.[test]'`), which
+adds pytest and pypdf on top of the runtime dependencies. The `dev` extra already
+includes it.
 
 The installed `automation-toolkit` command is equivalent to
 `python -m automation_toolkit`. Paths with spaces must be quoted.

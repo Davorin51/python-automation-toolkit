@@ -70,6 +70,10 @@ The command prints a completed run folder under `reports/`. It contains an Excel
 workbook, a PDF, four PNG charts, `validation_errors.json` and `manifest.json`.
 Repeated runs create separate folders and preserve earlier reports.
 
+The plain install above contains only the runtime dependencies. Running the test
+suite additionally requires `pypdf`, which is included in the `test` and `dev`
+extras described under [Quality checks](#quality-checks).
+
 ### Expected demo results
 
 | Metric | Value |
@@ -125,6 +129,9 @@ future transaction-line-ID extension. Details and limits are documented in
 [architecture.md](docs/architecture.md).
 
 ## Quality checks
+
+The `test` extra installs pytest, pytest-cov and pypdf (used to read back the
+generated PDF reports). The `dev` extra includes `test` plus Ruff and `build`.
 
 ```bash
 python -m pip install -e '.[dev]'

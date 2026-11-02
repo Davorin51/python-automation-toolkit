@@ -1,7 +1,15 @@
+from importlib.util import find_spec
 from pathlib import Path
 
 import pandas as pd
 import pytest
+
+if find_spec("pypdf") is None:
+    raise pytest.UsageError(
+        "The test suite needs pypdf, which is not part of the runtime dependencies. "
+        "Install the test extras first: python -m pip install -e '.[test]' "
+        "(or '.[dev]' for the full developer toolchain)."
+    )
 
 from automation_toolkit.config import Config
 from automation_toolkit.ingestion import load_files
