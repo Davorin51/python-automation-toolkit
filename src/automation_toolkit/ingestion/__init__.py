@@ -25,19 +25,54 @@ ALIASES = {
 logger = logging.getLogger(__name__)
 
 
+def _header_text(column: object) -> str:
+    """Return the header as text; blank, None or NaN headers become an empty string."""
+    if column is None or (isinstance(column, float) and pd.isna(column)):
+        return ""
+    return str(column).strip()
+
+
+def blank_rows(frame: pd.DataFrame) -> pd.Series:
+    """Rows whose cells are all missing or whitespace-only, such as trailing blank lines."""
+    if frame.empty:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    blank_cells = frame.isna() | frame.map(lambda v: isinstance(v, str) and not v.strip())
+    return blank_cells.all(axis=1)
+
+
 def normalize_columns(frame: pd.DataFrame, config: Config) -> pd.DataFrame:
     names = []
+    sources: dict[str, list[str]] = {}
     for column in frame.columns:
-        name = config.column_mapping.get(str(column), str(column))
+        header = _header_text(column)
+        if not header:
+            # Blank headers (trailing delimiters, empty formatted Excel columns) carry no data.
+            names.append("")
+            continue
+        name = config.column_mapping.get(header, header)
         name = re.sub(r"[\s-]+", "_", name.strip().lower())
-        names.append(ALIASES.get(name, name))
-    if len(names) != len(set(names)):
-        raise IngestionError("Ambiguous columns: multiple headers map to the same field.")
+        name = ALIASES.get(name, name)
+        names.append(name)
+        sources.setdefault(name, []).append(header)
+    ambiguous = {name: headers for name, headers in sources.items() if len(headers) > 1}
+    if ambiguous:
+        detail = "; ".join(
+            f"{', '.join(repr(h) for h in headers)} -> {name}"
+            for name, headers in ambiguous.items()
+        )
+        raise IngestionError(
+            f"Ambiguous columns: multiple headers map to the same field ({detail})."
+        )
     result = frame.copy()
     result.columns = names
     missing = set(REQUIRED) - set(names)
     if missing:
-        raise IngestionError(f"Missing required columns: {', '.join(sorted(missing))}.")
+        found_headers = [h for headers in sources.values() for h in headers]
+        found = ", ".join(repr(h) for h in found_headers) or "none"
+        raise IngestionError(
+            f"Missing required columns: {', '.join(sorted(missing))}. "
+            f"Found headers: {found}. Rename the headers or use column_mapping."
+        )
     return result[REQUIRED + (["order_id"] if "order_id" in names else [])]
 
 
@@ -50,17 +85,28 @@ def load_files(paths: list[Path], config: Config) -> pd.DataFrame:
     frames = []
     has_ids = set()
     for original, path in zip(paths, resolved, strict=True):
-        if not path.is_file():
+        if not path.exists():
             raise IngestionError(f"Input file does not exist: {path}")
+        if not path.is_file():
+            raise IngestionError(f"Input path is not a file: {path}")
         reader = {".csv": read_csv, ".xlsx": read_excel}.get(path.suffix.lower())
         if reader is None:
             raise IngestionError(f"Unsupported file type: {path.suffix}. Use CSV or XLSX.")
-        frame = normalize_columns(reader(path, config), config)
+        raw = reader(path, config)
+        try:
+            frame = normalize_columns(raw, config)
+        except IngestionError as exc:
+            raise IngestionError(f"{path.name}: {exc}") from None
+        frame["source_file"] = str(original)
+        # Number rows before dropping blanks so source_row still matches the file.
+        frame["source_row"] = range(2, len(frame) + 2)
+        blank = blank_rows(raw)
+        if blank.any():
+            logger.info("Skipped %s blank rows in %s", int(blank.sum()), path.name)
+            frame = frame.loc[~blank.to_numpy()]
         if frame.empty:
             raise IngestionError(f"Input file has no data rows: {path.name}")
         has_ids.add("order_id" in frame.columns)
-        frame["source_file"] = str(original)
-        frame["source_row"] = range(2, len(frame) + 2)
         frames.append(frame)
         logger.info("Loaded %s rows from %s", len(frame), path.name)
     if len(has_ids) > 1:

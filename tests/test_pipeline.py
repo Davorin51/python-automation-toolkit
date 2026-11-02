@@ -1,6 +1,8 @@
 import json
+from datetime import datetime
 
 import pytest
+from openpyxl import Workbook
 
 from automation_toolkit.cli import main
 from automation_toolkit.config import Config
@@ -81,3 +83,20 @@ def test_cli_success_and_friendly_errors(sales_file, tmp_path, capsys):
     assert main(["--input", str(sales_file), "--config", str(tmp_path / "missing.yaml")]) == 1
     with pytest.raises(ReportError):
         run_pipeline([sales_file], tmp_path, report_format="unknown")
+
+
+def test_validation_errors_json_identifies_rows_and_columns(tmp_path):
+    path = tmp_path / "sales.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Date", "Product", "Category", "Quantity", "Unit Price"])
+    ws.append([datetime(2026, 1, 5), "Laptop", "Electronics", 2, 900])
+    ws.append([datetime(2026, 1, 6), None, "Electronics", 1, 20])
+    wb.save(path)
+    run = run_pipeline([path], tmp_path / "reports", report_format="excel")
+    records = json.loads((run.output_dir / "validation_errors.json").read_text())
+    assert len(records) == 1
+    assert records[0]["source_row"] == 3
+    assert records[0]["date"].startswith("2026-01-06")
+    assert records[0]["reason"] == "Missing product"
+    assert records[0]["invalid_columns"] == "product"

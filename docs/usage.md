@@ -58,10 +58,19 @@ accepted. Order IDs should be stored as text to preserve leading zeros.
 
 Common aliases include `Date`, `Transaction Date`, `Product Name`, `Qty`, `Price`,
 `Unit Price` and `Order ID`. Whitespace and hyphens in headers become underscores.
-Two headers mapping to one field produce an error instead of a silent choice.
-Product and category values retain case and have surrounding whitespace removed.
+Two headers mapping to one field produce an error that names both headers instead
+of a silent choice. Blank header cells, such as trailing delimiters, are ignored.
+Product and category values retain case, and surrounding whitespace is removed
+from every value before validation. Completely blank rows are skipped and logged.
 For CSV inputs, `source_row` is the logical record number including the header;
 quoted fields containing line breaks can span several physical text-file lines.
+
+Each record in `validation_errors.json` and the Validation Errors worksheet has
+`source_file`, `source_row`, `reason` and `invalid_columns`. The reason lists each
+failed check separated by `; ` (for example `Missing unit_price` for a blank cell,
+`Invalid date (expected format %Y-%m-%d)` or `Duplicate transaction line (first
+occurrence: january.csv row 12)`), and `invalid_columns` lists the affected
+columns in the same order. Under `quarantine` the raw values are included too.
 
 ## Outputs and exit status
 

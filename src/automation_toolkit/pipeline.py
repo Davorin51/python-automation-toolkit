@@ -60,7 +60,10 @@ def run_pipeline(
             write_pdf(
                 staging / "sales_report.pdf", validation, metrics, charts, config, generated_at
             )
-        validation.errors.to_json(staging / "validation_errors.json", orient="records", indent=2)
+        # ISO dates keep native Excel date cells readable in the diagnostics instead of epoch ms.
+        validation.errors.to_json(
+            staging / "validation_errors.json", orient="records", indent=2, date_format="iso"
+        )
         sources = []
         for source in inputs:
             with source.open("rb") as stream:

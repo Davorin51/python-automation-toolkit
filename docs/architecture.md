@@ -34,16 +34,32 @@ modeled. Per-line quantities are capped at 1,000,000 and unit prices at
 
 | Policy | Behavior | Error report |
 | --- | --- | --- |
-| `quarantine` | Exclude invalid/duplicate rows | Raw business values, reason and source row |
-| `skip` | Exclude invalid/duplicate rows | Reason and source row only |
+| `quarantine` | Exclude invalid/duplicate rows | Raw business values, source file and row, reason and affected columns |
+| `skip` | Exclude invalid/duplicate rows | Source file and row, reason and affected columns only |
 | `reject_file` | Exclude every row in a file containing any invalid/duplicate row | Invalid-row diagnostics plus rejected file names in manifest |
 
+Every error record names the source file, the `source_row` in that file, a
+`reason` listing each failed check separated by `; `, and `invalid_columns`
+listing the normalized column names that failed in the same order. Blank cells
+are reported as `Missing <column>` so they can be told apart from malformed
+values; an invalid date message includes the configured `date_format`. Text
+values are trimmed before parsing, so surrounding whitespace is not an error.
+
+Rows whose cells are all empty (trailing blank lines, empty formatted Excel rows)
+are skipped before validation and logged; they are neither counted as input rows
+nor treated as invalid, so they cannot trigger `reject_file`. Header cells that
+are blank (trailing delimiters, empty Excel columns) are ignored. Source row
+numbers always refer to the original file.
+
 Schema or ingestion errors stop the whole run because the file cannot be
-interpreted reliably. If no usable transactions remain, execution fails before
-reports are written and reports the invalid-row/rejected-file counts.
+interpreted reliably. The message names the file and the offending headers, for
+example which two headers map to one field or which headers were found when a
+required column is missing. If no usable transactions remain, execution fails
+before reports are written and reports the invalid-row/rejected-file counts.
 
 Duplicates are exact normalized business-line matches, using order ID when
-available, across all selected files. First occurrence wins. Input order therefore
+available, across all selected files. First occurrence wins, and the duplicate's
+reason names the file and row of that first occurrence. Input order therefore
 matters. Identical legitimate lines within the same order cannot be distinguished
 without a transaction-line ID; the current schema does not support one. Without
 order IDs, identical rows are considered duplicates even if they were separate

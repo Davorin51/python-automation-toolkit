@@ -8,7 +8,8 @@
     "quantity":"1",
     "unit_price":"899.99",
     "order_id":"BAD-1",
-    "reason":"Invalid date"
+    "reason":"Invalid date (expected format %Y-%m-%d)",
+    "invalid_columns":"date"
   },
   {
     "source_file":"examples\/sample_sales_dirty.csv",
@@ -19,7 +20,8 @@
     "quantity":"-2",
     "unit_price":"299.00",
     "order_id":"BAD-2",
-    "reason":"Quantity must be a positive integer <= 1000000"
+    "reason":"Quantity must be a positive integer <= 1000000",
+    "invalid_columns":"quantity"
   },
   {
     "source_file":"examples\/sample_sales_dirty.csv",
@@ -30,7 +32,8 @@
     "quantity":"1",
     "unit_price":"",
     "order_id":"BAD-3",
-    "reason":"Price must be non-negative with at most two decimal places"
+    "reason":"Missing unit_price",
+    "invalid_columns":"unit_price"
   },
   {
     "source_file":"examples\/sample_sales_dirty.csv",
@@ -41,7 +44,8 @@
     "quantity":"1",
     "unit_price":"4.50",
     "order_id":"BAD-4",
-    "reason":"Missing product"
+    "reason":"Missing product",
+    "invalid_columns":"product"
   },
   {
     "source_file":"examples\/sample_sales_dirty.csv",
@@ -52,7 +56,8 @@
     "quantity":"1",
     "unit_price":"6.901",
     "order_id":"BAD-5",
-    "reason":"Price must be non-negative with at most two decimal places"
+    "reason":"Price must be non-negative with at most two decimal places",
+    "invalid_columns":"unit_price"
   },
   {
     "source_file":"examples\/sample_sales_dirty.csv",
@@ -63,7 +68,8 @@
     "quantity":"4",
     "unit_price":"6.90",
     "order_id":"ORD-00001",
-    "reason":"Duplicate transaction line"
+    "reason":"Duplicate transaction line (first occurrence: sample_sales_dirty.csv row 2)",
+    "invalid_columns":"date; product; category; quantity; unit_price; order_id"
   },
   {
     "source_file":"examples\/sample_sales_dirty.csv",
@@ -74,6 +80,7 @@
     "quantity":"5",
     "unit_price":"249.50",
     "order_id":"ORD-00001",
-    "reason":"Duplicate transaction line"
+    "reason":"Duplicate transaction line (first occurrence: sample_sales_dirty.csv row 3)",
+    "invalid_columns":"date; product; category; quantity; unit_price; order_id"
   }
 ]
