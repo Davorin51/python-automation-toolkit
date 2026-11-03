@@ -32,6 +32,7 @@ performs that batch workflow and keeps rejected-row diagnostics for review.
 | Capability | Implementation |
 | --- | --- |
 | CSV and XLSX input | Multiple files, header aliases, explicit mappings and provenance |
+| Large CSV exports | Optional incremental reading in configurable chunks, with checkpoint and resume |
 | Data quality | Invalid dates, missing fields, negative/fractional quantities, invalid prices, duplicates |
 | Validation policy | Quarantine raw rows, skip with diagnostics, or reject the entire affected file |
 | Business metrics | Revenue, orders, average order value, units, category/product breakdowns |
@@ -100,6 +101,12 @@ automation-toolkit --input examples/sample_sales.xlsx --output reports --format 
 # Combine separate exports (the schemas must agree on order_id)
 automation-toolkit --input january.csv february.xlsx --output reports --format all
 
+# Parse a large CSV incrementally, 50,000 records at a time (or set csv_chunk_size)
+automation-toolkit --input big_export.csv --output reports --format excel --chunk-size 50000
+
+# Also record progress so an interrupted run resumes at the next chunk
+automation-toolkit --input big_export.csv --output reports --chunk-size 50000 --checkpoint-dir .checkpoints
+
 # Install and launch the optional desktop application
 python -m pip install -e '.[gui]'
 automation-toolkit-gui
@@ -160,8 +167,9 @@ on Python 3.12.14. Core ingestion, validation and analytics took approximately
 run rereads the same input after the core measurement and may benefit from file
 caching. No memory measurement or universal throughput claim is made.
 
-The implementation holds input data in memory. Excel's worksheet row limit still
-applies. Test the benchmark on the deployment machine before sizing a workflow.
+The implementation holds input data in memory; chunked CSV reading bounds parser
+memory but the assembled table is still materialized. Excel's worksheet row limit
+still applies. Test the benchmark on the deployment machine before sizing a workflow.
 
 ## Project structure
 
@@ -181,7 +189,7 @@ docs/              Architecture, usage, measurements and previews
 
 See [architecture](docs/architecture.md), [contribution guidelines](CONTRIBUTING.md)
 and [changelog](CHANGELOG.md). Planned extensions include configurable transaction
-line IDs, chunked ingestion and additional business schemas.
+line IDs and additional business schemas.
 
 ## License
 

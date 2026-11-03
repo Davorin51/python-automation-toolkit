@@ -17,6 +17,8 @@ class Config:
     date_format: str = "%Y-%m-%d"
     csv_delimiter: str = ","
     csv_encoding: str = "utf-8-sig"
+    csv_chunk_size: int | None = None
+    csv_checkpoint_dir: str | None = None
     excel_sheet: str | int = 0
     top_n: int = 10
     column_mapping: dict[str, str] = field(default_factory=dict)
@@ -35,6 +37,12 @@ class Config:
             raise ConfigurationError("csv_delimiter must contain exactly one character.")
         if type(self.top_n) is not int or not 1 <= self.top_n <= 50:
             raise ConfigurationError("top_n must be an integer between 1 and 50.")
+        check_chunk_size(self.csv_chunk_size)
+        if self.csv_checkpoint_dir is not None:
+            if not isinstance(self.csv_checkpoint_dir, str) or not self.csv_checkpoint_dir.strip():
+                raise ConfigurationError("csv_checkpoint_dir must be null or a non-empty path.")
+            if self.csv_chunk_size is None:
+                raise ConfigurationError("csv_checkpoint_dir requires csv_chunk_size to be set.")
         if type(self.excel_sheet) not in (str, int) or (
             isinstance(self.excel_sheet, int) and self.excel_sheet < 0
         ):
@@ -45,6 +53,15 @@ class Config:
             for k, v in self.column_mapping.items()
         ):
             raise ConfigurationError("column_mapping must map source headers to supported fields.")
+
+
+def check_chunk_size(value: object) -> int | None:
+    """Return a validated CSV chunk size; ``None`` means read each file in one piece."""
+    if value is None:
+        return None
+    if type(value) is not int or value < 1:
+        raise ConfigurationError("csv_chunk_size must be null or a positive integer.")
+    return value
 
 
 def load_config(path: Path | None = None) -> Config:

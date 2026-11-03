@@ -8,8 +8,20 @@ import pandas as pd
 
 from automation_toolkit.config import Config
 from automation_toolkit.exceptions import IngestionError
-from automation_toolkit.ingestion.csv_reader import read_csv
+from automation_toolkit.ingestion.checkpoint import CsvCheckpoint
+from automation_toolkit.ingestion.csv_reader import iter_csv_chunks, read_csv
 from automation_toolkit.ingestion.excel_reader import read_excel
+
+__all__ = [
+    "ALIASES",
+    "REQUIRED",
+    "blank_rows",
+    "iter_csv_chunks",
+    "load_files",
+    "normalize_columns",
+    "read_csv",
+    "read_excel",
+]
 
 REQUIRED = ["date", "product", "category", "quantity", "unit_price"]
 ALIASES = {
@@ -89,26 +101,57 @@ def load_files(paths: list[Path], config: Config) -> pd.DataFrame:
             raise IngestionError(f"Input file does not exist: {path}")
         if not path.is_file():
             raise IngestionError(f"Input path is not a file: {path}")
-        reader = {".csv": read_csv, ".xlsx": read_excel}.get(path.suffix.lower())
-        if reader is None:
+        suffix = path.suffix.lower()
+        if suffix not in {".csv", ".xlsx"}:
             raise IngestionError(f"Unsupported file type: {path.suffix}. Use CSV or XLSX.")
-        raw = reader(path, config)
-        try:
-            frame = normalize_columns(raw, config)
-        except IngestionError as exc:
-            raise IngestionError(f"{path.name}: {exc}") from None
-        frame["source_file"] = str(original)
-        # Number rows before dropping blanks so source_row still matches the file.
-        frame["source_row"] = range(2, len(frame) + 2)
-        blank = blank_rows(raw)
-        if blank.any():
-            logger.info("Skipped %s blank rows in %s", int(blank.sum()), path.name)
-            frame = frame.loc[~blank.to_numpy()]
-        if frame.empty:
+        # CSV chunks are normalized and filtered one at a time, so extra columns, blank rows
+        # and the raw text of each chunk are released before the next chunk is parsed.
+        checkpoint = None
+        if suffix == ".csv" and config.csv_checkpoint_dir is not None:
+            checkpoint = CsvCheckpoint.open(Path(config.csv_checkpoint_dir), path, config)
+            chunks = iter_csv_chunks(path, config, skip_records=checkpoint.records)
+            pieces, columns, blank_count = (
+                list(checkpoint.pieces),
+                checkpoint.columns,
+                checkpoint.blank,
+            )
+            for piece in pieces:
+                # Provenance follows how the file was named in this run, not the earlier one.
+                piece["source_file"] = str(original)
+        else:
+            chunks = (
+                iter_csv_chunks(path, config)
+                if suffix == ".csv"
+                else iter((read_excel(path, config),))
+            )
+            pieces, columns, blank_count = [], None, 0
+        for raw in chunks:
+            try:
+                frame = normalize_columns(raw, config)
+            except IngestionError as exc:
+                raise IngestionError(f"{path.name}: {exc}") from None
+            frame["source_file"] = str(original)
+            # Number rows before dropping blanks so source_row still matches the file; the
+            # chunk index continues across chunks, so index + 2 is the record in the file.
+            frame["source_row"] = frame.index + 2
+            blank = blank_rows(raw)
+            if blank.any():
+                blank_count += int(blank.sum())
+                frame = frame.loc[~blank.to_numpy()]
+            columns = frame.columns
+            if not frame.empty:
+                pieces.append(frame)
+            if checkpoint is not None:
+                checkpoint.save(frame, len(raw), int(blank.sum()))
+        if blank_count:
+            logger.info("Skipped %s blank rows in %s", blank_count, path.name)
+        if not pieces:
             raise IngestionError(f"Input file has no data rows: {path.name}")
-        has_ids.add("order_id" in frame.columns)
-        frames.append(frame)
-        logger.info("Loaded %s rows from %s", len(frame), path.name)
+        if checkpoint is not None:
+            checkpoint.complete()
+        has_ids.add(columns is not None and "order_id" in columns)
+        frames.extend(pieces)
+        logger.info("Loaded %s rows from %s", sum(len(piece) for piece in pieces), path.name)
     if len(has_ids) > 1:
         raise IngestionError("Provide order_id in every input file or in none of them.")
     return pd.concat(frames, ignore_index=True)

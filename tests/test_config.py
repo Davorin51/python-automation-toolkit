@@ -15,6 +15,11 @@ from automation_toolkit.exceptions import ConfigurationError
         {"top_n": 0},
         {"top_n": 51},
         {"csv_delimiter": "::"},
+        {"csv_chunk_size": 0},
+        {"csv_chunk_size": -5},
+        {"csv_chunk_size": True},
+        {"csv_chunk_size": "100"},
+        {"csv_chunk_size": 2.5},
         {"company_name": ""},
         {"currency": 1},
         {"excel_sheet": -1},
@@ -35,6 +40,14 @@ def test_yaml_configuration(tmp_path: Path):
     assert load_config().top_n == 10
     path.write_text("")
     assert load_config(path) == Config()
+    assert Config().csv_chunk_size is None
+    path.write_text("csv_chunk_size: 500\n")
+    assert load_config(path).csv_chunk_size == 500
+    path.write_text("csv_chunk_size: null\n")
+    assert load_config(path).csv_chunk_size is None
+    assert load_config(path).csv_checkpoint_dir is None
+    path.write_text("csv_chunk_size: 500\ncsv_checkpoint_dir: .checkpoints\n")
+    assert load_config(path).csv_checkpoint_dir == ".checkpoints"
 
 
 @pytest.mark.parametrize("content", ["- unexpected", "unknown: value", "broken: ["])

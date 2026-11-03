@@ -1,0 +1,590 @@
+diff --git a/.gitignore b/.gitignore
+index bf20889..d36c96d 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -11,3 +11,6 @@ dist/
+ build/
+ reports/
+ .DS_Store
++
++# Resumable chunked-CSV progress
++.checkpoints/
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 95c8bc6..50217c5 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,19 @@
+ 
+ ## Unreleased
+ 
++- Add incremental CSV processing: the `csv_chunk_size` setting and `--chunk-size`
++  CLI flag read CSV inputs in fixed-size chunks through the new
++  `iter_csv_chunks` generator, producing the same frame, `source_row` numbers and
++  validation results as a whole-file read; invalid sizes are configuration errors
++  and parse or decoding failures in any chunk are reported as ingestion errors.
++- Add checkpoint and resume for incremental CSV loading: `csv_checkpoint_dir`
++  and `--checkpoint-dir` persist each processed chunk and a checksummed manifest
++  so an interrupted run resumes after the last completed chunk with identical
++  results; unreadable, altered or stale checkpoints are discarded with a warning
++  and the file is processed from the start. Requires `csv_chunk_size`.
++- Normalize, drop extra columns and skip blank rows per chunk during incremental
++  CSV loading, so peak memory is bounded by one raw chunk plus the final table of
++  required fields instead of the whole raw file.
+ - Validation errors now include an `invalid_columns` field naming the affected
+   columns, blank cells are reported as `Missing <column>`, invalid dates name the
+   configured format, and duplicates point to the file and row of the first
+diff --git a/README.md b/README.md
+index cf2f7af..c79bc5d 100644
+--- a/README.md
++++ b/README.md
+@@ -32,6 +32,7 @@ performs that batch workflow and keeps rejected-row diagnostics for review.
+ | Capability | Implementation |
+ | --- | --- |
+ | CSV and XLSX input | Multiple files, header aliases, explicit mappings and provenance |
++| Large CSV exports | Optional incremental reading in configurable chunks, with checkpoint and resume |
+ | Data quality | Invalid dates, missing fields, negative/fractional quantities, invalid prices, duplicates |
+ | Validation policy | Quarantine raw rows, skip with diagnostics, or reject the entire affected file |
+ | Business metrics | Revenue, orders, average order value, units, category/product breakdowns |
+@@ -100,6 +101,12 @@ automation-toolkit --input examples/sample_sales.xlsx --output reports --format
+ # Combine separate exports (the schemas must agree on order_id)
+ automation-toolkit --input january.csv february.xlsx --output reports --format all
+ 
++# Parse a large CSV incrementally, 50,000 records at a time (or set csv_chunk_size)
++automation-toolkit --input big_export.csv --output reports --format excel --chunk-size 50000
++
++# Also record progress so an interrupted run resumes at the next chunk
++automation-toolkit --input big_export.csv --output reports --chunk-size 50000 --checkpoint-dir .checkpoints
++
+ # Install and launch the optional desktop application
+ python -m pip install -e '.[gui]'
+ automation-toolkit-gui
+@@ -160,8 +167,9 @@ on Python 3.12.14. Core ingestion, validation and analytics took approximately
+ run rereads the same input after the core measurement and may benefit from file
+ caching. No memory measurement or universal throughput claim is made.
+ 
+-The implementation holds input data in memory. Excel's worksheet row limit still
+-applies. Test the benchmark on the deployment machine before sizing a workflow.
++The implementation holds input data in memory; chunked CSV reading bounds parser
++memory but the assembled table is still materialized. Excel's worksheet row limit
++still applies. Test the benchmark on the deployment machine before sizing a workflow.
+ 
+ ## Project structure
+ 
+@@ -181,7 +189,7 @@ docs/              Architecture, usage, measurements and previews
+ 
+ See [architecture](docs/architecture.md), [contribution guidelines](CONTRIBUTING.md)
+ and [changelog](CHANGELOG.md). Planned extensions include configurable transaction
+-line IDs, chunked ingestion and additional business schemas.
++line IDs and additional business schemas.
+ 
+ ## License
+ 
+diff --git a/config.yaml b/config.yaml
+index 99a698f..af0e90b 100644
+--- a/config.yaml
++++ b/config.yaml
+@@ -5,6 +5,12 @@ validation_policy: quarantine
+ date_format: "%Y-%m-%d"
+ csv_delimiter: ","
+ csv_encoding: utf-8-sig
++# null reads each CSV in one piece; a positive integer reads it incrementally in
++# chunks of that many records (also available as --chunk-size on the CLI).
++csv_chunk_size: null
++# Optional folder for chunked-CSV checkpoints so an interrupted run resumes where it
++# stopped (requires csv_chunk_size; also available as --checkpoint-dir on the CLI).
++csv_checkpoint_dir: null
+ excel_sheet: 0
+ top_n: 10
+ # Optional explicit source-header -> canonical-field mapping:
+diff --git a/docs/architecture.md b/docs/architecture.md
+index d0aad3c..ab04393 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -92,8 +92,22 @@ chart generation is not a supported API contract.
+ ## Scaling limits
+ 
+ Ingestion and validation are vectorized, but input tables are held in memory.
+-This is a batch tool, not a streaming engine. Excel has a 1,048,576-row worksheet
+-limit; the transaction export rejects larger datasets. Category charts show up to
+-20 categories. Memory and rendering cost depend on text length and cardinality.
+-See the measured single-run example in `benchmark.json`, and reproduce it on the
+-target machine before setting operational limits.
++This is a batch tool, not a streaming engine. CSV files can optionally be parsed
++incrementally (`csv_chunk_size` or `--chunk-size`): the reader yields fixed-size
++chunks that share the whole-file parser contract, and each chunk is normalized,
++stripped of extra columns and cleared of blank rows before the next chunk is
++parsed. Only the required fields of real data rows accumulate, so peak memory is
++bounded by one raw chunk plus the final table while results stay identical.
++Duplicate detection across files, calendar trends and the Excel export still need
++the complete table, so the assembled frame is not chunked. With
++`csv_checkpoint_dir` set, every processed chunk is persisted as JSON together
++with a manifest that fingerprints the source (path, size, modification time) and
++the ingestion settings and checksums each chunk; a later run restores the chunks,
++skips that many records and continues. Any inconsistency discards the checkpoint
++with a warning rather than trusting partial state, and a completed file removes
++its checkpoint. Excel has a
++1,048,576-row worksheet limit; the transaction export rejects larger datasets.
++Category charts show up to 20 categories. Memory and rendering cost depend on
++text length and cardinality. See the measured single-run example in
++`benchmark.json`, and reproduce it on the target machine before setting
++operational limits.
+diff --git a/docs/usage.md b/docs/usage.md
+index 28fb799..c16a5be 100644
+--- a/docs/usage.md
++++ b/docs/usage.md
+@@ -39,6 +39,8 @@ validation_policy: quarantine
+ date_format: "%Y-%m-%d"
+ csv_delimiter: ","
+ csv_encoding: utf-8-sig
++csv_chunk_size: null
++csv_checkpoint_dir: null
+ excel_sheet: 0
+ top_n: 10
+ column_mapping:
+@@ -72,6 +74,94 @@ failed check separated by `; ` (for example `Missing unit_price` for a blank cel
+ occurrence: january.csv row 12)`), and `invalid_columns` lists the affected
+ columns in the same order. Under `quarantine` the raw values are included too.
+ 
++## Incremental CSV processing
++
++By default each CSV file is parsed in one piece. Set `csv_chunk_size` to a positive
++integer, or pass `--chunk-size ROWS` on the command line, and CSV inputs are read
++incrementally in chunks of that many records instead:
++
++```bash
++automation-toolkit --input big_export.csv --output reports --format excel --chunk-size 50000
++```
++
++The command-line flag overrides the configuration value for that run. XLSX inputs
++are unaffected. The results are identical to a whole-file read: the same columns,
++raw text values, blank-row handling, `source_row` numbers and validation outcome,
++which the test suite checks against the bundled fixtures. A chunk size of `0`, a
++negative number or a non-integer is rejected as a configuration error (exit code
++`1`); a non-numeric `--chunk-size` is rejected by argparse (exit code `2`). A
++malformed line or an undecodable byte in any chunk stops the run with the usual
++`Cannot read CSV <file>: ...` message, so a problem late in a large file is
++reported the same way as one at the top.
++
++In chunk mode each chunk is normalized, stripped of extra columns and cleared of
++blank rows as soon as it is parsed, so peak memory is roughly one raw chunk plus
++the final table of required fields rather than the whole raw file. Progress is
++logged in `--verbose` mode. The pipeline still assembles the complete validated
++table because duplicate detection, trend calculations and the Excel export need
++every row. For your own scripts the generator behind this is available directly:
++
++```python
++from pathlib import Path
++
++from automation_toolkit.config import Config
++from automation_toolkit.ingestion import iter_csv_chunks, normalize_columns
++
++config = Config(csv_chunk_size=10_000)
++for chunk in iter_csv_chunks(Path("big_export.csv"), config):
++    frame = normalize_columns(chunk, config)
++    ...  # chunk.index + 2 is the record number in the file, header included
++```
++
++Each chunk carries the header values as its columns, keeps cells as untouched text,
++and continues the integer index from the previous chunk. A header-only file yields
++one empty chunk; an empty file raises `IngestionError`. Passing `chunk_size=` to
++the generator overrides the configured value, and leaving both unset yields the
++whole file as a single chunk.
++
++## Checkpoints and resuming an interrupted run
++
++Chunked CSV loading can record its progress so that a run interrupted by Ctrl-C,
++a crash or a malformed record resumes at the first unfinished chunk instead of
++starting over. Set `csv_checkpoint_dir` in the configuration or pass
++`--checkpoint-dir DIR` together with a chunk size:
++
++```bash
++automation-toolkit --input big_export.csv --output reports --chunk-size 50000 --checkpoint-dir .checkpoints
++# ... interrupted ...
++automation-toolkit --input big_export.csv --output reports --chunk-size 50000 --checkpoint-dir .checkpoints
++```
++
++Each CSV input gets its own folder under the checkpoint directory, named after the
++file plus a hash of its full path. After every chunk the normalized rows of that
++chunk are written as a small JSON file and the folder's `checkpoint.json` manifest
++is updated; both are written to a temporary name first and renamed, so a crash
++never leaves a half-written chunk in place. The manifest records the source file's
++path, size and modification time, the chunk size, delimiter, encoding and column
++mapping, and a SHA-256 checksum of every chunk file. The second run restores the
++saved chunks, skips exactly that many records in the file (quoted line breaks and
++blank lines included) and logs
++`Resuming <file> from checkpoint: N chunks (M records) already processed`.
++When a file has been fully loaded its checkpoint folder is removed, so a run that
++completes leaves the directory empty. The result is identical to an uninterrupted
++run, including `source_row` numbers and the blank-row count in the log.
++
++A checkpoint is only trusted when everything in it checks out. If the manifest is
++unreadable or malformed, the source file changed size or modification time, the
++settings differ, a chunk file is missing, truncated, altered or does not match its
++manifest entry, the whole checkpoint is discarded with a warning
++(`Ignoring unusable checkpoint for <file> (<reason>); processing from the start.`)
++and the file is processed from the beginning. Stray files in the folder are
++ignored. A checkpoint directory that cannot be written (for example a path that is
++an existing file) stops the run with `Cannot write checkpoint for <file>: ...`,
++because silently running without the requested checkpoints would be a surprise.
++`csv_checkpoint_dir` without `csv_chunk_size` is a configuration error. Excel
++inputs are never checkpointed, and nothing is written unless the option is set.
++
++Checkpoints cover ingestion only. Validation, analytics and report generation
++always run on the complete table, so a failure while writing reports is reported
++as before and the next run re-reads the inputs.
++
+ ## Outputs and exit status
+ 
+ The console prints the completed run directory. `all` writes:
+diff --git a/src/automation_toolkit/cli.py b/src/automation_toolkit/cli.py
+index fe377bd..45e0463 100644
+--- a/src/automation_toolkit/cli.py
++++ b/src/automation_toolkit/cli.py
+@@ -1,5 +1,6 @@
+ import argparse
+ import logging
++from dataclasses import replace
+ from pathlib import Path
+ 
+ from automation_toolkit import __version__
+@@ -17,6 +18,18 @@ def main(argv: list[str] | None = None) -> int:
+     parser.add_argument("--output", type=Path, default=Path("reports"))
+     parser.add_argument("--format", choices=["all", "excel", "pdf", "charts"], default="all")
+     parser.add_argument("--config", type=Path)
++    parser.add_argument(
++        "--chunk-size",
++        type=int,
++        metavar="ROWS",
++        help="Read CSV inputs incrementally in chunks of ROWS records (overrides csv_chunk_size)",
++    )
++    parser.add_argument(
++        "--checkpoint-dir",
++        type=Path,
++        metavar="DIR",
++        help="Save chunked CSV progress under DIR and resume an interrupted run from it",
++    )
+     parser.add_argument("--verbose", action="store_true")
+     args = parser.parse_args(argv)
+     logging.basicConfig(
+@@ -24,7 +37,12 @@ def main(argv: list[str] | None = None) -> int:
+         format="%(levelname)s %(name)s: %(message)s",
+     )
+     try:
+-        result = run_pipeline(args.input, args.output, load_config(args.config), args.format)
++        config = load_config(args.config)
++        if args.chunk_size is not None:
++            config = replace(config, csv_chunk_size=args.chunk_size)
++        if args.checkpoint_dir is not None:
++            config = replace(config, csv_checkpoint_dir=str(args.checkpoint_dir))
++        result = run_pipeline(args.input, args.output, config, args.format)
+     except (ToolkitError, ValueError) as exc:
+         logging.getLogger(__name__).error("%s", exc)
+         return 1
+diff --git a/src/automation_toolkit/config.py b/src/automation_toolkit/config.py
+index 575ab7b..124857b 100644
+--- a/src/automation_toolkit/config.py
++++ b/src/automation_toolkit/config.py
+@@ -17,6 +17,8 @@ class Config:
+     date_format: str = "%Y-%m-%d"
+     csv_delimiter: str = ","
+     csv_encoding: str = "utf-8-sig"
++    csv_chunk_size: int | None = None
++    csv_checkpoint_dir: str | None = None
+     excel_sheet: str | int = 0
+     top_n: int = 10
+     column_mapping: dict[str, str] = field(default_factory=dict)
+@@ -35,6 +37,12 @@ class Config:
+             raise ConfigurationError("csv_delimiter must contain exactly one character.")
+         if type(self.top_n) is not int or not 1 <= self.top_n <= 50:
+             raise ConfigurationError("top_n must be an integer between 1 and 50.")
++        check_chunk_size(self.csv_chunk_size)
++        if self.csv_checkpoint_dir is not None:
++            if not isinstance(self.csv_checkpoint_dir, str) or not self.csv_checkpoint_dir.strip():
++                raise ConfigurationError("csv_checkpoint_dir must be null or a non-empty path.")
++            if self.csv_chunk_size is None:
++                raise ConfigurationError("csv_checkpoint_dir requires csv_chunk_size to be set.")
+         if type(self.excel_sheet) not in (str, int) or (
+             isinstance(self.excel_sheet, int) and self.excel_sheet < 0
+         ):
+@@ -47,6 +55,15 @@ class Config:
+             raise ConfigurationError("column_mapping must map source headers to supported fields.")
+ 
+ 
++def check_chunk_size(value: object) -> int | None:
++    """Return a validated CSV chunk size; ``None`` means read each file in one piece."""
++    if value is None:
++        return None
++    if type(value) is not int or value < 1:
++        raise ConfigurationError("csv_chunk_size must be null or a positive integer.")
++    return value
++
++
+ def load_config(path: Path | None = None) -> Config:
+     if path is None:
+         return Config()
+diff --git a/src/automation_toolkit/ingestion/__init__.py b/src/automation_toolkit/ingestion/__init__.py
+index dbabe4b..35bb25b 100644
+--- a/src/automation_toolkit/ingestion/__init__.py
++++ b/src/automation_toolkit/ingestion/__init__.py
+@@ -8,9 +8,21 @@ import pandas as pd
+ 
+ from automation_toolkit.config import Config
+ from automation_toolkit.exceptions import IngestionError
+-from automation_toolkit.ingestion.csv_reader import read_csv
++from automation_toolkit.ingestion.checkpoint import CsvCheckpoint
++from automation_toolkit.ingestion.csv_reader import iter_csv_chunks, read_csv
+ from automation_toolkit.ingestion.excel_reader import read_excel
+ 
++__all__ = [
++    "ALIASES",
++    "REQUIRED",
++    "blank_rows",
++    "iter_csv_chunks",
++    "load_files",
++    "normalize_columns",
++    "read_csv",
++    "read_excel",
++]
++
+ REQUIRED = ["date", "product", "category", "quantity", "unit_price"]
+ ALIASES = {
+     "transaction_date": "date",
+@@ -89,26 +101,57 @@ def load_files(paths: list[Path], config: Config) -> pd.DataFrame:
+             raise IngestionError(f"Input file does not exist: {path}")
+         if not path.is_file():
+             raise IngestionError(f"Input path is not a file: {path}")
+-        reader = {".csv": read_csv, ".xlsx": read_excel}.get(path.suffix.lower())
+-        if reader is None:
++        suffix = path.suffix.lower()
++        if suffix not in {".csv", ".xlsx"}:
+             raise IngestionError(f"Unsupported file type: {path.suffix}. Use CSV or XLSX.")
+-        raw = reader(path, config)
+-        try:
+-            frame = normalize_columns(raw, config)
+-        except IngestionError as exc:
+-            raise IngestionError(f"{path.name}: {exc}") from None
+-        frame["source_file"] = str(original)
+-        # Number rows before dropping blanks so source_row still matches the file.
+-        frame["source_row"] = range(2, len(frame) + 2)
+-        blank = blank_rows(raw)
+-        if blank.any():
+-            logger.info("Skipped %s blank rows in %s", int(blank.sum()), path.name)
+-            frame = frame.loc[~blank.to_numpy()]
+-        if frame.empty:
++        # CSV chunks are normalized and filtered one at a time, so extra columns, blank rows
++        # and the raw text of each chunk are released before the next chunk is parsed.
++        checkpoint = None
++        if suffix == ".csv" and config.csv_checkpoint_dir is not None:
++            checkpoint = CsvCheckpoint.open(Path(config.csv_checkpoint_dir), path, config)
++            chunks = iter_csv_chunks(path, config, skip_records=checkpoint.records)
++            pieces, columns, blank_count = (
++                list(checkpoint.pieces),
++                checkpoint.columns,
++                checkpoint.blank,
++            )
++            for piece in pieces:
++                # Provenance follows how the file was named in this run, not the earlier one.
++                piece["source_file"] = str(original)
++        else:
++            chunks = (
++                iter_csv_chunks(path, config)
++                if suffix == ".csv"
++                else iter((read_excel(path, config),))
++            )
++            pieces, columns, blank_count = [], None, 0
++        for raw in chunks:
++            try:
++                frame = normalize_columns(raw, config)
++            except IngestionError as exc:
++                raise IngestionError(f"{path.name}: {exc}") from None
++            frame["source_file"] = str(original)
++            # Number rows before dropping blanks so source_row still matches the file; the
++            # chunk index continues across chunks, so index + 2 is the record in the file.
++            frame["source_row"] = frame.index + 2
++            blank = blank_rows(raw)
++            if blank.any():
++                blank_count += int(blank.sum())
++                frame = frame.loc[~blank.to_numpy()]
++            columns = frame.columns
++            if not frame.empty:
++                pieces.append(frame)
++            if checkpoint is not None:
++                checkpoint.save(frame, len(raw), int(blank.sum()))
++        if blank_count:
++            logger.info("Skipped %s blank rows in %s", blank_count, path.name)
++        if not pieces:
+             raise IngestionError(f"Input file has no data rows: {path.name}")
+-        has_ids.add("order_id" in frame.columns)
+-        frames.append(frame)
+-        logger.info("Loaded %s rows from %s", len(frame), path.name)
++        if checkpoint is not None:
++            checkpoint.complete()
++        has_ids.add(columns is not None and "order_id" in columns)
++        frames.extend(pieces)
++        logger.info("Loaded %s rows from %s", sum(len(piece) for piece in pieces), path.name)
+     if len(has_ids) > 1:
+         raise IngestionError("Provide order_id in every input file or in none of them.")
+     return pd.concat(frames, ignore_index=True)
+diff --git a/src/automation_toolkit/ingestion/csv_reader.py b/src/automation_toolkit/ingestion/csv_reader.py
+index 3e1f56c..8dc9f65 100644
+--- a/src/automation_toolkit/ingestion/csv_reader.py
++++ b/src/automation_toolkit/ingestion/csv_reader.py
+@@ -1,24 +1,111 @@
++"""CSV ingestion: whole-file reads and incremental, chunked reads sharing one parser contract."""
++
++import logging
++from collections.abc import Iterator
+ from pathlib import Path
+ 
+ import pandas as pd
+ 
+-from automation_toolkit.config import Config
+-from automation_toolkit.exceptions import IngestionError
++from automation_toolkit.config import Config, check_chunk_size
++from automation_toolkit.exceptions import ConfigurationError, IngestionError
+ 
++logger = logging.getLogger(__name__)
+ 
+-def read_csv(path: Path, config: Config) -> pd.DataFrame:
++# Everything pandas raises for unreadable files, bad encodings and malformed CSV.
++_READ_ERRORS = (OSError, ValueError, UnicodeError, LookupError, pd.errors.ParserError)
++
++
++def _read_options(config: Config, skip_records: int = 0) -> dict[str, object]:
++    # Preserve IDs, strings such as NA, and raw values for error diagnostics.
++    options: dict[str, object] = {
++        "sep": config.csv_delimiter,
++        "encoding": config.csv_encoding,
++        "dtype": str,
++        "keep_default_na": False,
++        "skip_blank_lines": False,
++        "header": None,
++    }
++    if skip_records:
++        # A row range skips parsed records (quoted line breaks and blank lines included),
++        # so a resumed read starts exactly after the last checkpointed record.
++        options["skiprows"] = range(1, skip_records + 1)
++    return options
++
++
++def _read_whole(path: Path, config: Config, skip_records: int = 0) -> pd.DataFrame:
++    frame = pd.read_csv(path, **_read_options(config, skip_records))
++    frame.columns = frame.iloc[0].tolist()
++    return frame.iloc[1:].reset_index(drop=True)
++
++
++def _read_chunks(
++    path: Path, config: Config, chunk_size: int, skip_records: int = 0
++) -> Iterator[pd.DataFrame]:
++    rows = skip_records
++    chunks = 0
++    options = _read_options(config, skip_records)
++    with pd.read_csv(path, chunksize=chunk_size, **options) as reader:
++        # The header is read on its own so every data chunk holds exactly chunk_size records.
++        header = reader.get_chunk(1)
++        columns = header.iloc[0].tolist()
++        while True:
++            try:
++                chunk = reader.get_chunk(chunk_size)
++            except StopIteration:
++                break
++            chunk.columns = columns
++            chunk.index = pd.RangeIndex(rows, rows + len(chunk))
++            rows += len(chunk)
++            chunks += 1
++            logger.debug("Read chunk %s of %s (%s rows so far)", chunks, path.name, rows)
++            yield chunk
++        if chunks == 0 and not skip_records:
++            # A header-only file still yields one empty chunk so callers learn the columns.
++            empty = header.iloc[0:0].reset_index(drop=True)
++            empty.columns = columns
++            yield empty
++    logger.info(
++        "Read %s rows from %s in %s chunks of up to %s",
++        rows - skip_records,
++        path.name,
++        chunks,
++        chunk_size,
++    )
++
++
++def iter_csv_chunks(
++    path: Path, config: Config, chunk_size: int | None = None, skip_records: int = 0
++) -> Iterator[pd.DataFrame]:
++    """Yield the raw CSV records as consecutive DataFrames of at most ``chunk_size`` rows.
++
++    ``chunk_size`` defaults to ``config.csv_chunk_size``; when both are ``None`` the whole file
++    is yielded as one chunk. Chunks follow the same contract as :func:`read_csv`: the header
++    values are the columns, cells are untouched text, blank lines are kept, and the integer
++    index continues across chunks so ``index + 2`` is the record number in the file. A
++    header-only file yields one empty chunk. Parsing problems anywhere in the file surface as
++    :class:`IngestionError` from the ``next()`` call that hit them, and the file is closed.
++
++    ``skip_records`` resumes after that many data records (the header is always read); the
++    index of the first yielded row is then ``skip_records``, and nothing is yielded when the
++    skipped records already cover the whole file.
++    """
++    size = check_chunk_size(chunk_size) if chunk_size is not None else config.csv_chunk_size
++    if type(skip_records) is not int or skip_records < 0:
++        raise ConfigurationError("skip_records must be a non-negative integer.")
+     try:
+-        # Preserve IDs, strings such as NA, and raw values for error diagnostics.
+-        frame = pd.read_csv(
+-            path,
+-            sep=config.csv_delimiter,
+-            encoding=config.csv_encoding,
+-            dtype=str,
+-            keep_default_na=False,
+-            skip_blank_lines=False,
+-            header=None,
+-        )
+-        frame.columns = frame.iloc[0].tolist()
+-        return frame.iloc[1:].reset_index(drop=True)
+-    except (OSError, ValueError, UnicodeError, LookupError, pd.errors.ParserError) as exc:
++        if size is None:
++            yield _read_whole(path, config, skip_records)
++        else:
++            yield from _read_chunks(path, config, size, skip_records)
++    except _READ_ERRORS as exc:
+         raise IngestionError(f"Cannot read CSV {path.name}: {exc}") from exc
++
++
++def read_csv(path: Path, config: Config) -> pd.DataFrame:
++    """Read the whole CSV, incrementally when ``config.csv_chunk_size`` is set."""
++    if config.csv_chunk_size is None:
++        try:
++            return _read_whole(path, config)
++        except _READ_ERRORS as exc:
++            raise IngestionError(f"Cannot read CSV {path.name}: {exc}") from exc
++    return pd.concat(list(iter_csv_chunks(path, config)), ignore_index=True)
+diff --git a/tests/test_config.py b/tests/test_config.py
+index d9c501d..86b54f6 100644
+--- a/tests/test_config.py
++++ b/tests/test_config.py
+@@ -15,6 +15,11 @@ from automation_toolkit.exceptions import ConfigurationError
+         {"top_n": 0},
+         {"top_n": 51},
+         {"csv_delimiter": "::"},
++        {"csv_chunk_size": 0},
++        {"csv_chunk_size": -5},
++        {"csv_chunk_size": True},
++        {"csv_chunk_size": "100"},
++        {"csv_chunk_size": 2.5},
+         {"company_name": ""},
+         {"currency": 1},
+         {"excel_sheet": -1},
+@@ -35,6 +40,14 @@ def test_yaml_configuration(tmp_path: Path):
+     assert load_config().top_n == 10
+     path.write_text("")
+     assert load_config(path) == Config()
++    assert Config().csv_chunk_size is None
++    path.write_text("csv_chunk_size: 500\n")
++    assert load_config(path).csv_chunk_size == 500
++    path.write_text("csv_chunk_size: null\n")
++    assert load_config(path).csv_chunk_size is None
++    assert load_config(path).csv_checkpoint_dir is None
++    path.write_text("csv_chunk_size: 500\ncsv_checkpoint_dir: .checkpoints\n")
++    assert load_config(path).csv_checkpoint_dir == ".checkpoints"
+ 
+ 
+ @pytest.mark.parametrize("content", ["- unexpected", "unknown: value", "broken: ["])

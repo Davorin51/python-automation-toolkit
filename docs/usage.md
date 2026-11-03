@@ -39,6 +39,8 @@ validation_policy: quarantine
 date_format: "%Y-%m-%d"
 csv_delimiter: ","
 csv_encoding: utf-8-sig
+csv_chunk_size: null
+csv_checkpoint_dir: null
 excel_sheet: 0
 top_n: 10
 column_mapping:
@@ -71,6 +73,94 @@ failed check separated by `; ` (for example `Missing unit_price` for a blank cel
 `Invalid date (expected format %Y-%m-%d)` or `Duplicate transaction line (first
 occurrence: january.csv row 12)`), and `invalid_columns` lists the affected
 columns in the same order. Under `quarantine` the raw values are included too.
+
+## Incremental CSV processing
+
+By default each CSV file is parsed in one piece. Set `csv_chunk_size` to a positive
+integer, or pass `--chunk-size ROWS` on the command line, and CSV inputs are read
+incrementally in chunks of that many records instead:
+
+```bash
+automation-toolkit --input big_export.csv --output reports --format excel --chunk-size 50000
+```
+
+The command-line flag overrides the configuration value for that run. XLSX inputs
+are unaffected. The results are identical to a whole-file read: the same columns,
+raw text values, blank-row handling, `source_row` numbers and validation outcome,
+which the test suite checks against the bundled fixtures. A chunk size of `0`, a
+negative number or a non-integer is rejected as a configuration error (exit code
+`1`); a non-numeric `--chunk-size` is rejected by argparse (exit code `2`). A
+malformed line or an undecodable byte in any chunk stops the run with the usual
+`Cannot read CSV <file>: ...` message, so a problem late in a large file is
+reported the same way as one at the top.
+
+In chunk mode each chunk is normalized, stripped of extra columns and cleared of
+blank rows as soon as it is parsed, so peak memory is roughly one raw chunk plus
+the final table of required fields rather than the whole raw file. Progress is
+logged in `--verbose` mode. The pipeline still assembles the complete validated
+table because duplicate detection, trend calculations and the Excel export need
+every row. For your own scripts the generator behind this is available directly:
+
+```python
+from pathlib import Path
+
+from automation_toolkit.config import Config
+from automation_toolkit.ingestion import iter_csv_chunks, normalize_columns
+
+config = Config(csv_chunk_size=10_000)
+for chunk in iter_csv_chunks(Path("big_export.csv"), config):
+    frame = normalize_columns(chunk, config)
+    ...  # chunk.index + 2 is the record number in the file, header included
+```
+
+Each chunk carries the header values as its columns, keeps cells as untouched text,
+and continues the integer index from the previous chunk. A header-only file yields
+one empty chunk; an empty file raises `IngestionError`. Passing `chunk_size=` to
+the generator overrides the configured value, and leaving both unset yields the
+whole file as a single chunk.
+
+## Checkpoints and resuming an interrupted run
+
+Chunked CSV loading can record its progress so that a run interrupted by Ctrl-C,
+a crash or a malformed record resumes at the first unfinished chunk instead of
+starting over. Set `csv_checkpoint_dir` in the configuration or pass
+`--checkpoint-dir DIR` together with a chunk size:
+
+```bash
+automation-toolkit --input big_export.csv --output reports --chunk-size 50000 --checkpoint-dir .checkpoints
+# ... interrupted ...
+automation-toolkit --input big_export.csv --output reports --chunk-size 50000 --checkpoint-dir .checkpoints
+```
+
+Each CSV input gets its own folder under the checkpoint directory, named after the
+file plus a hash of its full path. After every chunk the normalized rows of that
+chunk are written as a small JSON file and the folder's `checkpoint.json` manifest
+is updated; both are written to a temporary name first and renamed, so a crash
+never leaves a half-written chunk in place. The manifest records the source file's
+path, size and modification time, the chunk size, delimiter, encoding and column
+mapping, and a SHA-256 checksum of every chunk file. The second run restores the
+saved chunks, skips exactly that many records in the file (quoted line breaks and
+blank lines included) and logs
+`Resuming <file> from checkpoint: N chunks (M records) already processed`.
+When a file has been fully loaded its checkpoint folder is removed, so a run that
+completes leaves the directory empty. The result is identical to an uninterrupted
+run, including `source_row` numbers and the blank-row count in the log.
+
+A checkpoint is only trusted when everything in it checks out. If the manifest is
+unreadable or malformed, the source file changed size or modification time, the
+settings differ, a chunk file is missing, truncated, altered or does not match its
+manifest entry, the whole checkpoint is discarded with a warning
+(`Ignoring unusable checkpoint for <file> (<reason>); processing from the start.`)
+and the file is processed from the beginning. Stray files in the folder are
+ignored. A checkpoint directory that cannot be written (for example a path that is
+an existing file) stops the run with `Cannot write checkpoint for <file>: ...`,
+because silently running without the requested checkpoints would be a surprise.
+`csv_checkpoint_dir` without `csv_chunk_size` is a configuration error. Excel
+inputs are never checkpointed, and nothing is written unless the option is set.
+
+Checkpoints cover ingestion only. Validation, analytics and report generation
+always run on the complete table, so a failure while writing reports is reported
+as before and the next run re-reads the inputs.
 
 ## Outputs and exit status
 

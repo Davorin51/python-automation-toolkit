@@ -11,3 +11,6 @@ dist/
 build/
 reports/
 .DS_Store
+
+# Resumable chunked-CSV progress
+.checkpoints/

@@ -1,5 +1,6 @@
 import argparse
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from automation_toolkit import __version__
@@ -17,6 +18,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=Path("reports"))
     parser.add_argument("--format", choices=["all", "excel", "pdf", "charts"], default="all")
     parser.add_argument("--config", type=Path)
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        metavar="ROWS",
+        help="Read CSV inputs incrementally in chunks of ROWS records (overrides csv_chunk_size)",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        metavar="DIR",
+        help="Save chunked CSV progress under DIR and resume an interrupted run from it",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -24,7 +37,12 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
     try:
-        result = run_pipeline(args.input, args.output, load_config(args.config), args.format)
+        config = load_config(args.config)
+        if args.chunk_size is not None:
+            config = replace(config, csv_chunk_size=args.chunk_size)
+        if args.checkpoint_dir is not None:
+            config = replace(config, csv_checkpoint_dir=str(args.checkpoint_dir))
+        result = run_pipeline(args.input, args.output, config, args.format)
     except (ToolkitError, ValueError) as exc:
         logging.getLogger(__name__).error("%s", exc)
         return 1

@@ -92,8 +92,22 @@ chart generation is not a supported API contract.
 ## Scaling limits
 
 Ingestion and validation are vectorized, but input tables are held in memory.
-This is a batch tool, not a streaming engine. Excel has a 1,048,576-row worksheet
-limit; the transaction export rejects larger datasets. Category charts show up to
-20 categories. Memory and rendering cost depend on text length and cardinality.
-See the measured single-run example in `benchmark.json`, and reproduce it on the
-target machine before setting operational limits.
+This is a batch tool, not a streaming engine. CSV files can optionally be parsed
+incrementally (`csv_chunk_size` or `--chunk-size`): the reader yields fixed-size
+chunks that share the whole-file parser contract, and each chunk is normalized,
+stripped of extra columns and cleared of blank rows before the next chunk is
+parsed. Only the required fields of real data rows accumulate, so peak memory is
+bounded by one raw chunk plus the final table while results stay identical.
+Duplicate detection across files, calendar trends and the Excel export still need
+the complete table, so the assembled frame is not chunked. With
+`csv_checkpoint_dir` set, every processed chunk is persisted as JSON together
+with a manifest that fingerprints the source (path, size, modification time) and
+the ingestion settings and checksums each chunk; a later run restores the chunks,
+skips that many records and continues. Any inconsistency discards the checkpoint
+with a warning rather than trusting partial state, and a completed file removes
+its checkpoint. Excel has a
+1,048,576-row worksheet limit; the transaction export rejects larger datasets.
+Category charts show up to 20 categories. Memory and rendering cost depend on
+text length and cardinality. See the measured single-run example in
+`benchmark.json`, and reproduce it on the target machine before setting
+operational limits.

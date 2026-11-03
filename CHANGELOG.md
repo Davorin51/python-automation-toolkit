@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Add incremental CSV processing: the `csv_chunk_size` setting and `--chunk-size`
+  CLI flag read CSV inputs in fixed-size chunks through the new
+  `iter_csv_chunks` generator, producing the same frame, `source_row` numbers and
+  validation results as a whole-file read; invalid sizes are configuration errors
+  and parse or decoding failures in any chunk are reported as ingestion errors.
+- Add checkpoint and resume for incremental CSV loading: `csv_checkpoint_dir`
+  and `--checkpoint-dir` persist each processed chunk and a checksummed manifest
+  so an interrupted run resumes after the last completed chunk with identical
+  results; unreadable, altered or stale checkpoints are discarded with a warning
+  and the file is processed from the start. Requires `csv_chunk_size`.
+- Normalize, drop extra columns and skip blank rows per chunk during incremental
+  CSV loading, so peak memory is bounded by one raw chunk plus the final table of
+  required fields instead of the whole raw file.
 - Validation errors now include an `invalid_columns` field naming the affected
   columns, blank cells are reported as `Missing <column>`, invalid dates name the
   configured format, and duplicates point to the file and row of the first

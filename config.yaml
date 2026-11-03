@@ -5,6 +5,12 @@ validation_policy: quarantine
 date_format: "%Y-%m-%d"
 csv_delimiter: ","
 csv_encoding: utf-8-sig
+# null reads each CSV in one piece; a positive integer reads it incrementally in
+# chunks of that many records (also available as --chunk-size on the CLI).
+csv_chunk_size: null
+# Optional folder for chunked-CSV checkpoints so an interrupted run resumes where it
+# stopped (requires csv_chunk_size; also available as --checkpoint-dir on the CLI).
+csv_checkpoint_dir: null
 excel_sheet: 0
 top_n: 10
 # Optional explicit source-header -> canonical-field mapping:
