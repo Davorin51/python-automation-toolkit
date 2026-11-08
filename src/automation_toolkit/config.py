@@ -21,6 +21,7 @@ class Config:
     csv_checkpoint_dir: str | None = None
     excel_sheet: str | int = 0
     top_n: int = 10
+    quality_report: bool = False
     column_mapping: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -37,6 +38,8 @@ class Config:
             raise ConfigurationError("csv_delimiter must contain exactly one character.")
         if type(self.top_n) is not int or not 1 <= self.top_n <= 50:
             raise ConfigurationError("top_n must be an integer between 1 and 50.")
+        if type(self.quality_report) is not bool:
+            raise ConfigurationError("quality_report must be true or false.")
         check_chunk_size(self.csv_chunk_size)
         if self.csv_checkpoint_dir is not None:
             if not isinstance(self.csv_checkpoint_dir, str) or not self.csv_checkpoint_dir.strip():

@@ -7,6 +7,7 @@ from automation_toolkit import __version__
 from automation_toolkit.config import load_config
 from automation_toolkit.exceptions import ToolkitError
 from automation_toolkit.pipeline import run_pipeline
+from automation_toolkit.processing.quality import QualityReport
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,6 +31,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="DIR",
         help="Save chunked CSV progress under DIR and resume an interrupted run from it",
     )
+    parser.add_argument(
+        "--quality-report",
+        action="store_true",
+        help="Also write data_quality.json with validation statistics by check, column and file",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -42,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
             config = replace(config, csv_chunk_size=args.chunk_size)
         if args.checkpoint_dir is not None:
             config = replace(config, csv_checkpoint_dir=str(args.checkpoint_dir))
+        if args.quality_report:
+            config = replace(config, quality_report=True)
         result = run_pipeline(args.input, args.output, config, args.format)
     except (ToolkitError, ValueError) as exc:
         logging.getLogger(__name__).error("%s", exc)
@@ -51,4 +59,27 @@ def main(argv: list[str] | None = None) -> int:
         f"Revenue: {result.analytics.total_revenue_cents / 100:,.2f}; "
         f"orders: {result.analytics.orders}; excluded rows: {result.validation.excluded_rows}"
     )
+    if result.quality is not None:
+        print(quality_summary(result.quality))
     return 0
+
+
+def quality_summary(report: QualityReport) -> str:
+    """One console line: acceptance rate, invalid rows and the most frequent check."""
+    summary = report.summary
+    text = (
+        f"Data quality: {summary.accepted_percent:.2f}% accepted "
+        f"({summary.accepted_rows}/{summary.input_rows}); {summary.invalid_rows} invalid"
+    )
+    if summary.rejected_files:
+        text += f"; {summary.rejected_files} rejected file(s)"
+    if report.ingestion is not None:
+        if report.ingestion.blank_rows:
+            text += f"; {report.ingestion.blank_rows} blank row(s) skipped"
+        if report.ingestion.resumed_files:
+            text += f"; {report.ingestion.resumed_files} file(s) resumed from checkpoint"
+    if report.checks:
+        top = report.checks[0]
+        where = f" in {top.column}" if top.column else ""
+        text += f"; top issue: {top.code}{where} ({top.rows})"
+    return text

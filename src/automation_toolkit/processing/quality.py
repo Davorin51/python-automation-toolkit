@@ -16,7 +16,7 @@ import pandas as pd
 
 from automation_toolkit import __version__
 from automation_toolkit.config import Config
-from automation_toolkit.ingestion import REQUIRED
+from automation_toolkit.ingestion import REQUIRED, FileStats, IngestionStats
 from automation_toolkit.processing.validation import (
     CHECK_DESCRIPTIONS,
     CHECK_DIMENSIONS,
@@ -82,7 +82,11 @@ class ColumnSummary:
 
 @dataclass(frozen=True)
 class FileSummary:
-    """Per-source-file row accounting, including whole-file rejection."""
+    """Per-source-file row accounting, including whole-file rejection.
+
+    ``ingestion`` carries how the file was read (records, blank rows, chunks, checkpoint
+    resume) when the caller supplied :class:`IngestionStats`; otherwise it is ``None``.
+    """
 
     source_file: str
     file_name: str
@@ -92,6 +96,7 @@ class FileSummary:
     excluded_rows: int
     rejected: bool
     issues: int
+    ingestion: FileStats | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -103,6 +108,7 @@ class FileSummary:
             "excluded_rows": self.excluded_rows,
             "rejected": self.rejected,
             "issues": self.issues,
+            "ingestion": self.ingestion.to_dict() if self.ingestion is not None else None,
         }
 
 
@@ -151,6 +157,8 @@ class QualityReport:
     policy: str
     settings: dict[str, Any]
     generated_at: datetime | None = None
+    #: Run-level reading statistics; ``None`` when the caller did not supply them.
+    ingestion: IngestionStats | None = None
     schema_version: int = SCHEMA_VERSION
     toolkit_version: str = __version__
 
@@ -163,6 +171,7 @@ class QualityReport:
             "policy": self.policy,
             "settings": dict(self.settings),
             "summary": self.summary.to_dict(),
+            "ingestion": self.ingestion.to_dict() if self.ingestion is not None else None,
             "dimensions": {name: dict(value) for name, value in self.dimensions.items()},
             "by_check": [check.to_dict() for check in self.checks],
             "by_column": [column.to_dict() for column in self.columns],
@@ -231,8 +240,11 @@ def _column_summaries(
     return summaries
 
 
-def _file_summaries(validation: ValidationResult, checks: pd.DataFrame) -> list[FileSummary]:
+def _file_summaries(
+    validation: ValidationResult, checks: pd.DataFrame, ingestion: IngestionStats | None
+) -> list[FileSummary]:
     rejected = set(validation.rejected_files)
+    read_stats = ingestion.by_source() if ingestion is not None else {}
     invalid_per_file = (
         validation.errors["source_file"].value_counts() if len(validation.errors) else pd.Series()
     )
@@ -253,6 +265,7 @@ def _file_summaries(validation: ValidationResult, checks: pd.DataFrame) -> list[
                 excluded_rows=excluded,
                 rejected=source in rejected,
                 issues=int(issues_per_file.get(source, 0)),
+                ingestion=read_stats.get(source),
             )
         )
     return summaries
@@ -291,12 +304,24 @@ def build_quality_report(
     generated_at: datetime | None = None,
     example_limit: int = EXAMPLE_LIMIT,
     top_reason_limit: int = TOP_REASON_LIMIT,
+    ingestion: IngestionStats | None = None,
 ) -> QualityReport:
     """Summarize ``validation`` by check, column and source file.
 
     Percentages use the validated input rows (blank rows already removed) as the
     denominator and are rounded to two decimals; with no input rows they are ``0.0``.
+    ``ingestion`` (from :func:`~automation_toolkit.ingestion.load_files_with_stats`) adds
+    records read, blank rows skipped, chunk counts and checkpoint-resume information at
+    run level and per file; it must describe the same files the validation came from,
+    and a file without statistics simply gets ``ingestion: None``.
     """
+    if ingestion is not None:
+        unknown = set(ingestion.by_source()) - set(validation.file_rows)
+        if unknown:
+            raise ValueError(
+                "Ingestion statistics name files that are not in the validation result: "
+                + ", ".join(sorted(unknown))
+            )
     checks = validation.checks
     input_rows = validation.input_rows
     if not checks.empty:
@@ -322,7 +347,7 @@ def build_quality_report(
         dimensions=_dimensions(checks, input_rows),
         checks=_check_summaries(checks, input_rows, example_limit),
         columns=_column_summaries(checks, _business_columns(validation), input_rows),
-        files=_file_summaries(validation, checks),
+        files=_file_summaries(validation, checks, ingestion),
         top_reasons=_top_reasons(validation.errors, top_reason_limit),
         policy=config.validation_policy,
         settings={
@@ -331,4 +356,5 @@ def build_quality_report(
             "checkpointing": config.csv_checkpoint_dir is not None,
         },
         generated_at=generated_at,
+        ingestion=ingestion,
     )

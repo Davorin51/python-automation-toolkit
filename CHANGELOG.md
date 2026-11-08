@@ -13,7 +13,19 @@
   aggregating validation statistics by check, by business column, by quality dimension
   (completeness, validity, uniqueness) and by source file, plus run-level counts,
   percentages and the most common reasons. `QualityReport.to_dict` renders a
-  deterministic, JSON-ready mapping. CLI integration and file export follow separately.
+  deterministic, JSON-ready mapping.
+- Add the optional `quality_report` setting and `--quality-report` CLI flag: when
+  enabled, every run folder also contains `data_quality.json` (listed in the manifest's
+  `outputs`) and the console prints a one-line quality summary. The report is built
+  from the run's existing validation result without rereading inputs; it is off by
+  default and does not change validation, the other outputs or exit codes.
+- Add `load_files_with_stats`, returning the same frame as `load_files` plus
+  `IngestionStats`: per file the raw records read, blank rows skipped, data rows,
+  whether it was read in chunks, chunks processed in this run, and chunks and records
+  restored from a checkpoint. The quality report gains an `ingestion` section and a
+  per-file `ingestion` object; the console summary mentions skipped blank rows and
+  resumed files. Whole-file, chunked and resumed reads report identical record, blank
+  and data-row counts.
 
 - Add incremental CSV processing: the `csv_chunk_size` setting and `--chunk-size`
   CLI flag read CSV inputs in fixed-size chunks through the new

@@ -43,6 +43,7 @@ csv_chunk_size: null
 csv_checkpoint_dir: null
 excel_sheet: 0
 top_n: 10
+quality_report: false
 column_mapping:
   Invoice Date: date
   Item: product
@@ -113,6 +114,10 @@ for chunk in iter_csv_chunks(Path("big_export.csv"), config):
     ...  # chunk.index + 2 is the record number in the file, header included
 ```
 
+`load_files_with_stats` returns the same frame as `load_files` together with an
+`IngestionStats` object (per file: records read, blank rows skipped, data rows,
+chunks processed and restored, checkpoint use); `load_files` itself is unchanged.
+
 Each chunk carries the header values as its columns, keeps cells as untouched text,
 and continues the integer index from the previous chunk. A header-only file yields
 one empty chunk; an empty file raises `IngestionError`. Passing `chunk_size=` to
@@ -162,6 +167,60 @@ Checkpoints cover ingestion only. Validation, analytics and report generation
 always run on the complete table, so a failure while writing reports is reported
 as before and the next run re-reads the inputs.
 
+## Data quality report
+
+Set `quality_report: true` in the configuration or pass `--quality-report` on the
+command line and every run folder additionally contains `data_quality.json`. The
+report is computed from the validation result that the run already produced, so the
+inputs are not read a second time and nothing about validation, the other outputs
+or the exit codes changes; the file is simply listed as one more entry under
+`outputs` in the manifest. The console then prints one extra line, for example
+`Data quality: 98.04% accepted (350/357); 7 invalid; top issue: duplicate_line (2)`;
+when relevant it also mentions skipped blank rows and files resumed from a
+checkpoint.
+
+```bash
+automation-toolkit --input examples/sample_sales_dirty.csv --output reports --format excel --quality-report
+```
+
+The JSON has a `schema_version`, the toolkit version, the manifest's
+`generated_at`, the validation `policy` and the ingestion `settings`, followed by:
+
+- `summary`: files, rejected files, input/accepted/invalid/excluded rows with
+  percentages of the input rows, `total_issues` (failed checks, not rows) and
+  `rows_with_multiple_issues`.
+- `ingestion`: how the inputs were read: `records_read` (raw records including
+  blank ones), `blank_rows_skipped`, `data_rows` (equal to the summary's input
+  rows), how many files were read in chunks, `chunks_processed` in this run,
+  `chunks_restored` from checkpoints, how many files had checkpointing enabled and
+  how many `files_resumed_from_checkpoint`. A whole-file CSV or XLSX read counts
+  as one chunk. Chunked and whole-file reads of the same file report the same
+  records, blank rows and data rows; only the chunk counts differ.
+- `dimensions`: distinct affected rows for `completeness` (missing values),
+  `validity` (malformed dates, quantities, prices) and `uniqueness` (duplicates).
+  A row with problems in two dimensions counts in both.
+- `by_check`: one entry per check code and column, most frequent first, with a
+  configuration-independent `description`, the row count, its percentage and up
+  to five example locations (`source_file`, `source_row`). Codes are
+  `missing_value`, `invalid_date`, `invalid_quantity`, `invalid_price` and
+  `duplicate_line`; the latter has an empty `column` because a duplicate is a
+  property of the whole line.
+- `by_column`: `missing`, `invalid`, distinct `issue_rows` and `complete_percent`
+  for each business column (plus `order_id` when present). Duplicates are not
+  attributed to their key columns here.
+- `by_file`: input, accepted, invalid and excluded rows, the number of failed
+  checks and whether the file was rejected under `reject_file`, in input order.
+  Each entry also carries an `ingestion` object with the file's `format`,
+  `records_read`, `blank_rows`, `data_rows`, `chunked`, `chunks_processed`,
+  `chunks_restored`, `records_restored`, `checkpointed` and
+  `resumed_from_checkpoint`.
+- `top_reasons`: the ten most common verbatim `reason` texts, so the counts
+  reconcile with `validation_errors.json`.
+
+Percentages are rounded to two decimals and use the validated input rows (blank
+rows already removed) as denominator. Identical inputs produce byte-identical
+files apart from `generated_at`.
+
 ## Outputs and exit status
 
 The console prints the completed run directory. `all` writes:
@@ -176,6 +235,7 @@ run-<timestamp>-<id>/
   charts/comparison.png
   validation_errors.json
   manifest.json
+  data_quality.json      (only with quality_report / --quality-report)
 ```
 
 PDF mode also produces its source PNG charts. Every format writes a manifest and

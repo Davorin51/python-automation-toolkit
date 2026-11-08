@@ -13,5 +13,8 @@ csv_chunk_size: null
 csv_checkpoint_dir: null
 excel_sheet: 0
 top_n: 10
+# true also writes data_quality.json (validation statistics by check, column and file)
+# into every run folder (also available as --quality-report on the CLI).
+quality_report: false
 # Optional explicit source-header -> canonical-field mapping:
 column_mapping: {}

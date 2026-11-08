@@ -1,0 +1,950 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f10a528..0f6c69e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -19,6 +19,13 @@
+   `outputs`) and the console prints a one-line quality summary. The report is built
+   from the run's existing validation result without rereading inputs; it is off by
+   default and does not change validation, the other outputs or exit codes.
++- Add `load_files_with_stats`, returning the same frame as `load_files` plus
++  `IngestionStats`: per file the raw records read, blank rows skipped, data rows,
++  whether it was read in chunks, chunks processed in this run, and chunks and records
++  restored from a checkpoint. The quality report gains an `ingestion` section and a
++  per-file `ingestion` object; the console summary mentions skipped blank rows and
++  resumed files. Whole-file, chunked and resumed reads report identical record, blank
++  and data-row counts.
+ 
+ - Add incremental CSV processing: the `csv_chunk_size` setting and `--chunk-size`
+   CLI flag read CSV inputs in fixed-size chunks through the new
+diff --git a/docs/architecture.md b/docs/architecture.md
+index fde718a..9febffa 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -59,7 +59,10 @@ one row per failed check with its source file, row and column. The optional data
+ quality report (`processing/quality.py`) aggregates that frame by check, column,
+ quality dimension and source file and renders a versioned, JSON-ready mapping; it
+ is a pure function of the validation result and never rereads inputs or alters the
+-outcome. `reporting/quality_report.py` writes it as `data_quality.json` when
++outcome. The pipeline loads inputs through `load_files_with_stats`, whose
++`IngestionStats` (records read, blank rows skipped, chunks processed, chunks and
++records restored from a checkpoint) are attached to the report at run level and per
++file; `load_files` remains the plain wrapper. `reporting/quality_report.py` writes it as `data_quality.json` when
+ `quality_report` is enabled.
+ 
+ Schema or ingestion errors stop the whole run because the file cannot be
+diff --git a/docs/data_quality_plan.md b/docs/data_quality_plan.md
+index d0a40af..7e3526c 100644
+--- a/docs/data_quality_plan.md
++++ b/docs/data_quality_plan.md
+@@ -1,9 +1,9 @@
+ # Data quality reporting: analysis and implementation plan
+ 
+-Status: steps 1 (check codes), 3 (QualityReport model) and the export/CLI part of
+-4 are implemented behind the opt-in `quality_report` setting. Still open: ingestion
+-statistics (section 2.2), the validation-only `quality` format, the quality gate,
+-`--quality-json`, and Excel/PDF integration (section 7). This document records what the current
++Status: check codes, the QualityReport model, ingestion statistics
++(`load_files_with_stats`), the JSON export and the CLI flag are implemented behind
++the opt-in `quality_report` setting. Still open: the validation-only `quality`
++format, the quality gate, `--quality-json`, and Excel/PDF integration (section 7). This document records what the current
+ code does, where the extension points are, and the changes I would make to add a
+ backward compatible data quality reporting option with validation statistics,
+ error summaries and a JSON export. Decisions that need your input are collected
+diff --git a/docs/usage.md b/docs/usage.md
+index 90e7b11..0a4593f 100644
+--- a/docs/usage.md
++++ b/docs/usage.md
+@@ -114,6 +114,10 @@ for chunk in iter_csv_chunks(Path("big_export.csv"), config):
+     ...  # chunk.index + 2 is the record number in the file, header included
+ ```
+ 
++`load_files_with_stats` returns the same frame as `load_files` together with an
++`IngestionStats` object (per file: records read, blank rows skipped, data rows,
++chunks processed and restored, checkpoint use); `load_files` itself is unchanged.
++
+ Each chunk carries the header values as its columns, keeps cells as untouched text,
+ and continues the integer index from the previous chunk. A header-only file yields
+ one empty chunk; an empty file raises `IngestionError`. Passing `chunk_size=` to
+@@ -171,7 +175,9 @@ report is computed from the validation result that the run already produced, so
+ inputs are not read a second time and nothing about validation, the other outputs
+ or the exit codes changes; the file is simply listed as one more entry under
+ `outputs` in the manifest. The console then prints one extra line, for example
+-`Data quality: 98.04% accepted (350/357); 7 invalid; top issue: duplicate_line (2)`.
++`Data quality: 98.04% accepted (350/357); 7 invalid; top issue: duplicate_line (2)`;
++when relevant it also mentions skipped blank rows and files resumed from a
++checkpoint.
+ 
+ ```bash
+ automation-toolkit --input examples/sample_sales_dirty.csv --output reports --format excel --quality-report
+@@ -183,6 +189,13 @@ The JSON has a `schema_version`, the toolkit version, the manifest's
+ - `summary`: files, rejected files, input/accepted/invalid/excluded rows with
+   percentages of the input rows, `total_issues` (failed checks, not rows) and
+   `rows_with_multiple_issues`.
++- `ingestion`: how the inputs were read: `records_read` (raw records including
++  blank ones), `blank_rows_skipped`, `data_rows` (equal to the summary's input
++  rows), how many files were read in chunks, `chunks_processed` in this run,
++  `chunks_restored` from checkpoints, how many files had checkpointing enabled and
++  how many `files_resumed_from_checkpoint`. A whole-file CSV or XLSX read counts
++  as one chunk. Chunked and whole-file reads of the same file report the same
++  records, blank rows and data rows; only the chunk counts differ.
+ - `dimensions`: distinct affected rows for `completeness` (missing values),
+   `validity` (malformed dates, quantities, prices) and `uniqueness` (duplicates).
+   A row with problems in two dimensions counts in both.
+@@ -197,6 +210,10 @@ The JSON has a `schema_version`, the toolkit version, the manifest's
+   attributed to their key columns here.
+ - `by_file`: input, accepted, invalid and excluded rows, the number of failed
+   checks and whether the file was rejected under `reject_file`, in input order.
++  Each entry also carries an `ingestion` object with the file's `format`,
++  `records_read`, `blank_rows`, `data_rows`, `chunked`, `chunks_processed`,
++  `chunks_restored`, `records_restored`, `checkpointed` and
++  `resumed_from_checkpoint`.
+ - `top_reasons`: the ten most common verbatim `reason` texts, so the counts
+   reconcile with `validation_errors.json`.
+ 
+diff --git a/examples/generated/data_quality.json b/examples/generated/data_quality.json
+index 58d7145..2aeb72b 100644
+--- a/examples/generated/data_quality.json
++++ b/examples/generated/data_quality.json
+@@ -1,7 +1,7 @@
+ {
+   "schema_version": 1,
+   "toolkit_version": "1.0.0",
+-  "generated_at": "2026-11-08T21:01:58.594396+00:00",
++  "generated_at": "2026-11-08T21:44:40.463468+00:00",
+   "policy": "quarantine",
+   "settings": {
+     "date_format": "%Y-%m-%d",
+@@ -21,6 +21,17 @@
+     "total_issues": 7,
+     "rows_with_multiple_issues": 0
+   },
++  "ingestion": {
++    "files": 1,
++    "records_read": 357,
++    "blank_rows_skipped": 0,
++    "data_rows": 357,
++    "chunked_files": 0,
++    "chunks_processed": 1,
++    "chunks_restored": 0,
++    "checkpointed_files": 0,
++    "files_resumed_from_checkpoint": 0
++  },
+   "dimensions": {
+     "completeness": {
+       "rows": 2,
+@@ -178,7 +189,21 @@
+       "invalid_rows": 7,
+       "excluded_rows": 7,
+       "rejected": false,
+-      "issues": 7
++      "issues": 7,
++      "ingestion": {
++        "source_file": "examples/sample_sales_dirty.csv",
++        "file_name": "sample_sales_dirty.csv",
++        "format": "csv",
++        "records_read": 357,
++        "blank_rows": 0,
++        "data_rows": 357,
++        "chunked": false,
++        "chunks_processed": 1,
++        "chunks_restored": 0,
++        "records_restored": 0,
++        "checkpointed": false,
++        "resumed_from_checkpoint": false
++      }
+     }
+   ],
+   "top_reasons": [
+diff --git a/src/automation_toolkit/cli.py b/src/automation_toolkit/cli.py
+index 2b38f82..49f89ad 100644
+--- a/src/automation_toolkit/cli.py
++++ b/src/automation_toolkit/cli.py
+@@ -73,6 +73,11 @@ def quality_summary(report: QualityReport) -> str:
+     )
+     if summary.rejected_files:
+         text += f"; {summary.rejected_files} rejected file(s)"
++    if report.ingestion is not None:
++        if report.ingestion.blank_rows:
++            text += f"; {report.ingestion.blank_rows} blank row(s) skipped"
++        if report.ingestion.resumed_files:
++            text += f"; {report.ingestion.resumed_files} file(s) resumed from checkpoint"
+     if report.checks:
+         top = report.checks[0]
+         where = f" in {top.column}" if top.column else ""
+diff --git a/src/automation_toolkit/ingestion/__init__.py b/src/automation_toolkit/ingestion/__init__.py
+index 35bb25b..d0f9ce4 100644
+--- a/src/automation_toolkit/ingestion/__init__.py
++++ b/src/automation_toolkit/ingestion/__init__.py
+@@ -2,7 +2,9 @@
+ 
+ import logging
+ import re
++from dataclasses import dataclass
+ from pathlib import Path
++from typing import Any
+ 
+ import pandas as pd
+ 
+@@ -15,9 +17,12 @@ from automation_toolkit.ingestion.excel_reader import read_excel
+ __all__ = [
+     "ALIASES",
+     "REQUIRED",
++    "FileStats",
++    "IngestionStats",
+     "blank_rows",
+     "iter_csv_chunks",
+     "load_files",
++    "load_files_with_stats",
+     "normalize_columns",
+     "read_csv",
+     "read_excel",
+@@ -88,13 +93,124 @@ def normalize_columns(frame: pd.DataFrame, config: Config) -> pd.DataFrame:
+     return result[REQUIRED + (["order_id"] if "order_id" in names else [])]
+ 
+ 
++@dataclass(frozen=True)
++class FileStats:
++    """How one input file was read.
++
++    ``records_read`` counts raw records including blank ones, restored from a checkpoint
++    plus parsed in this run, so ``records_read - blank_rows == data_rows`` always holds.
++    ``chunks_processed`` is the number of frames parsed in this run: one for a whole-file
++    CSV or XLSX read, otherwise the number of CSV chunks; chunks restored from a
++    checkpoint are counted separately.
++    """
++
++    source_file: str
++    file_name: str
++    file_format: str
++    records_read: int
++    blank_rows: int
++    data_rows: int
++    chunked: bool
++    chunks_processed: int
++    chunks_restored: int
++    records_restored: int
++    checkpointed: bool
++
++    @property
++    def resumed_from_checkpoint(self) -> bool:
++        return self.chunks_restored > 0
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "source_file": self.source_file,
++            "file_name": self.file_name,
++            "format": self.file_format,
++            "records_read": self.records_read,
++            "blank_rows": self.blank_rows,
++            "data_rows": self.data_rows,
++            "chunked": self.chunked,
++            "chunks_processed": self.chunks_processed,
++            "chunks_restored": self.chunks_restored,
++            "records_restored": self.records_restored,
++            "checkpointed": self.checkpointed,
++            "resumed_from_checkpoint": self.resumed_from_checkpoint,
++        }
++
++
++@dataclass(frozen=True)
++class IngestionStats:
++    """Per-file reading statistics for one :func:`load_files_with_stats` call, in input order."""
++
++    files: list[FileStats]
++
++    @property
++    def records_read(self) -> int:
++        return sum(f.records_read for f in self.files)
++
++    @property
++    def blank_rows(self) -> int:
++        return sum(f.blank_rows for f in self.files)
++
++    @property
++    def data_rows(self) -> int:
++        return sum(f.data_rows for f in self.files)
++
++    @property
++    def chunks_processed(self) -> int:
++        return sum(f.chunks_processed for f in self.files)
++
++    @property
++    def chunks_restored(self) -> int:
++        return sum(f.chunks_restored for f in self.files)
++
++    @property
++    def chunked_files(self) -> int:
++        return sum(1 for f in self.files if f.chunked)
++
++    @property
++    def checkpointed_files(self) -> int:
++        return sum(1 for f in self.files if f.checkpointed)
++
++    @property
++    def resumed_files(self) -> int:
++        return sum(1 for f in self.files if f.resumed_from_checkpoint)
++
++    def by_source(self) -> dict[str, FileStats]:
++        return {f.source_file: f for f in self.files}
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "files": len(self.files),
++            "records_read": self.records_read,
++            "blank_rows_skipped": self.blank_rows,
++            "data_rows": self.data_rows,
++            "chunked_files": self.chunked_files,
++            "chunks_processed": self.chunks_processed,
++            "chunks_restored": self.chunks_restored,
++            "checkpointed_files": self.checkpointed_files,
++            "files_resumed_from_checkpoint": self.resumed_files,
++        }
++
++
+ def load_files(paths: list[Path], config: Config) -> pd.DataFrame:
++    """Load and normalize the inputs; see :func:`load_files_with_stats` for the statistics."""
++    return load_files_with_stats(paths, config)[0]
++
++
++def load_files_with_stats(paths: list[Path], config: Config) -> tuple[pd.DataFrame, IngestionStats]:
++    """Load the inputs and report how each file was read.
++
++    The frame is identical to :func:`load_files`; the statistics expose the record, blank
++    row and chunk counts that were previously only logged, plus whether a CSV file was
++    resumed from a checkpoint.
++    """
+     if not paths:
+         raise IngestionError("Select at least one CSV or XLSX file.")
+     resolved = [p.resolve() for p in paths]
+     if len(set(resolved)) != len(resolved):
+         raise IngestionError("The same input file was selected more than once.")
+     frames = []
++    stats: list[FileStats] = []
+     has_ids = set()
+     for original, path in zip(paths, resolved, strict=True):
+         if not path.exists():
+@@ -107,8 +223,12 @@ def load_files(paths: list[Path], config: Config) -> pd.DataFrame:
+         # CSV chunks are normalized and filtered one at a time, so extra columns, blank rows
+         # and the raw text of each chunk are released before the next chunk is parsed.
+         checkpoint = None
++        records_restored = chunks_restored = 0
+         if suffix == ".csv" and config.csv_checkpoint_dir is not None:
+             checkpoint = CsvCheckpoint.open(Path(config.csv_checkpoint_dir), path, config)
++            # Captured before any save() appends to the manifest.
++            records_restored = checkpoint.records
++            chunks_restored = len(checkpoint.manifest["chunks"])
+             chunks = iter_csv_chunks(path, config, skip_records=checkpoint.records)
+             pieces, columns, blank_count = (
+                 list(checkpoint.pieces),
+@@ -125,7 +245,10 @@ def load_files(paths: list[Path], config: Config) -> pd.DataFrame:
+                 else iter((read_excel(path, config),))
+             )
+             pieces, columns, blank_count = [], None, 0
++        records_now = chunks_now = 0
+         for raw in chunks:
++            records_now += len(raw)
++            chunks_now += 1
+             try:
+                 frame = normalize_columns(raw, config)
+             except IngestionError as exc:
+@@ -151,7 +274,23 @@ def load_files(paths: list[Path], config: Config) -> pd.DataFrame:
+             checkpoint.complete()
+         has_ids.add(columns is not None and "order_id" in columns)
+         frames.extend(pieces)
+-        logger.info("Loaded %s rows from %s", sum(len(piece) for piece in pieces), path.name)
++        data_rows = sum(len(piece) for piece in pieces)
++        stats.append(
++            FileStats(
++                source_file=str(original),
++                file_name=path.name,
++                file_format=suffix.lstrip("."),
++                records_read=records_restored + records_now,
++                blank_rows=blank_count,
++                data_rows=data_rows,
++                chunked=suffix == ".csv" and config.csv_chunk_size is not None,
++                chunks_processed=chunks_now,
++                chunks_restored=chunks_restored,
++                records_restored=records_restored,
++                checkpointed=checkpoint is not None,
++            )
++        )
++        logger.info("Loaded %s rows from %s", data_rows, path.name)
+     if len(has_ids) > 1:
+         raise IngestionError("Provide order_id in every input file or in none of them.")
+-    return pd.concat(frames, ignore_index=True)
++    return pd.concat(frames, ignore_index=True), IngestionStats(stats)
+diff --git a/src/automation_toolkit/pipeline.py b/src/automation_toolkit/pipeline.py
+index 4506d12..7e6c0a6 100644
+--- a/src/automation_toolkit/pipeline.py
++++ b/src/automation_toolkit/pipeline.py
+@@ -13,7 +13,7 @@ from uuid import uuid4
+ from automation_toolkit import __version__
+ from automation_toolkit.config import Config
+ from automation_toolkit.exceptions import ReportError, ValidationError
+-from automation_toolkit.ingestion import load_files
++from automation_toolkit.ingestion import load_files_with_stats
+ from automation_toolkit.processing.analytics import Analytics, analyze
+ from automation_toolkit.processing.quality import QualityReport, build_quality_report
+ from automation_toolkit.processing.validation import ValidationResult, validate
+@@ -41,7 +41,8 @@ def run_pipeline(
+     config = config or Config()
+     if report_format not in {"all", "excel", "pdf", "charts"}:
+         raise ReportError("Report format must be all, excel, pdf or charts.")
+-    validation = validate(load_files(inputs, config), config)
++    frame, ingestion = load_files_with_stats(inputs, config)
++    validation = validate(frame, config)
+     if validation.transactions.empty:
+         raise ValidationError(
+             f"No valid transactions remain: {validation.invalid_rows} invalid "
+@@ -53,7 +54,9 @@ def run_pipeline(
+     # The report is derived from the validation result already in hand; inputs are not
+     # read a second time and the validation outcome is not affected.
+     quality = (
+-        build_quality_report(validation, config, generated_at) if config.quality_report else None
++        build_quality_report(validation, config, generated_at, ingestion=ingestion)
++        if config.quality_report
++        else None
+     )
+     staging = None
+     try:
+diff --git a/src/automation_toolkit/processing/quality.py b/src/automation_toolkit/processing/quality.py
+index ea7e6be..d41296d 100644
+--- a/src/automation_toolkit/processing/quality.py
++++ b/src/automation_toolkit/processing/quality.py
+@@ -16,7 +16,7 @@ import pandas as pd
+ 
+ from automation_toolkit import __version__
+ from automation_toolkit.config import Config
+-from automation_toolkit.ingestion import REQUIRED
++from automation_toolkit.ingestion import REQUIRED, FileStats, IngestionStats
+ from automation_toolkit.processing.validation import (
+     CHECK_DESCRIPTIONS,
+     CHECK_DIMENSIONS,
+@@ -82,7 +82,11 @@ class ColumnSummary:
+ 
+ @dataclass(frozen=True)
+ class FileSummary:
+-    """Per-source-file row accounting, including whole-file rejection."""
++    """Per-source-file row accounting, including whole-file rejection.
++
++    ``ingestion`` carries how the file was read (records, blank rows, chunks, checkpoint
++    resume) when the caller supplied :class:`IngestionStats`; otherwise it is ``None``.
++    """
+ 
+     source_file: str
+     file_name: str
+@@ -92,6 +96,7 @@ class FileSummary:
+     excluded_rows: int
+     rejected: bool
+     issues: int
++    ingestion: FileStats | None = None
+ 
+     def to_dict(self) -> dict[str, Any]:
+         return {
+@@ -103,6 +108,7 @@ class FileSummary:
+             "excluded_rows": self.excluded_rows,
+             "rejected": self.rejected,
+             "issues": self.issues,
++            "ingestion": self.ingestion.to_dict() if self.ingestion is not None else None,
+         }
+ 
+ 
+@@ -151,6 +157,8 @@ class QualityReport:
+     policy: str
+     settings: dict[str, Any]
+     generated_at: datetime | None = None
++    #: Run-level reading statistics; ``None`` when the caller did not supply them.
++    ingestion: IngestionStats | None = None
+     schema_version: int = SCHEMA_VERSION
+     toolkit_version: str = __version__
+ 
+@@ -163,6 +171,7 @@ class QualityReport:
+             "policy": self.policy,
+             "settings": dict(self.settings),
+             "summary": self.summary.to_dict(),
++            "ingestion": self.ingestion.to_dict() if self.ingestion is not None else None,
+             "dimensions": {name: dict(value) for name, value in self.dimensions.items()},
+             "by_check": [check.to_dict() for check in self.checks],
+             "by_column": [column.to_dict() for column in self.columns],
+@@ -231,8 +240,11 @@ def _column_summaries(
+     return summaries
+ 
+ 
+-def _file_summaries(validation: ValidationResult, checks: pd.DataFrame) -> list[FileSummary]:
++def _file_summaries(
++    validation: ValidationResult, checks: pd.DataFrame, ingestion: IngestionStats | None
++) -> list[FileSummary]:
+     rejected = set(validation.rejected_files)
++    read_stats = ingestion.by_source() if ingestion is not None else {}
+     invalid_per_file = (
+         validation.errors["source_file"].value_counts() if len(validation.errors) else pd.Series()
+     )
+@@ -253,6 +265,7 @@ def _file_summaries(validation: ValidationResult, checks: pd.DataFrame) -> list[
+                 excluded_rows=excluded,
+                 rejected=source in rejected,
+                 issues=int(issues_per_file.get(source, 0)),
++                ingestion=read_stats.get(source),
+             )
+         )
+     return summaries
+@@ -291,12 +304,24 @@ def build_quality_report(
+     generated_at: datetime | None = None,
+     example_limit: int = EXAMPLE_LIMIT,
+     top_reason_limit: int = TOP_REASON_LIMIT,
++    ingestion: IngestionStats | None = None,
+ ) -> QualityReport:
+     """Summarize ``validation`` by check, column and source file.
+ 
+     Percentages use the validated input rows (blank rows already removed) as the
+     denominator and are rounded to two decimals; with no input rows they are ``0.0``.
++    ``ingestion`` (from :func:`~automation_toolkit.ingestion.load_files_with_stats`) adds
++    records read, blank rows skipped, chunk counts and checkpoint-resume information at
++    run level and per file; it must describe the same files the validation came from,
++    and a file without statistics simply gets ``ingestion: None``.
+     """
++    if ingestion is not None:
++        unknown = set(ingestion.by_source()) - set(validation.file_rows)
++        if unknown:
++            raise ValueError(
++                "Ingestion statistics name files that are not in the validation result: "
++                + ", ".join(sorted(unknown))
++            )
+     checks = validation.checks
+     input_rows = validation.input_rows
+     if not checks.empty:
+@@ -322,7 +347,7 @@ def build_quality_report(
+         dimensions=_dimensions(checks, input_rows),
+         checks=_check_summaries(checks, input_rows, example_limit),
+         columns=_column_summaries(checks, _business_columns(validation), input_rows),
+-        files=_file_summaries(validation, checks),
++        files=_file_summaries(validation, checks, ingestion),
+         top_reasons=_top_reasons(validation.errors, top_reason_limit),
+         policy=config.validation_policy,
+         settings={
+@@ -331,4 +356,5 @@ def build_quality_report(
+             "checkpointing": config.csv_checkpoint_dir is not None,
+         },
+         generated_at=generated_at,
++        ingestion=ingestion,
+     )
+diff --git a/tests/test_ingestion_stats.py b/tests/test_ingestion_stats.py
+new file mode 100644
+index 0000000..e0d98fc
+--- /dev/null
++++ b/tests/test_ingestion_stats.py
+@@ -0,0 +1,357 @@
++"""Ingestion statistics: whole-file, chunked and resumed reads must agree on what was read."""
++
++import json
++from pathlib import Path
++
++import pandas as pd
++import pytest
++from openpyxl import Workbook
++from test_checkpoint import (
++    checkpoint_folder,
++    interrupt_after,
++    interrupt_before_completion,
++    write_source,
++)
++
++from automation_toolkit.cli import main
++from automation_toolkit.config import Config
++from automation_toolkit.exceptions import IngestionError
++from automation_toolkit.ingestion import (
++    FileStats,
++    IngestionStats,
++    load_files,
++    load_files_with_stats,
++)
++from automation_toolkit.ingestion.checkpoint import MANIFEST
++from automation_toolkit.processing.quality import build_quality_report
++from automation_toolkit.processing.validation import validate
++from automation_toolkit.reporting.quality_report import FILENAME
++
++EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
++
++
++@pytest.fixture
++def source(tmp_path):
++    # 10 data records (one with a quoted line break), one empty line and one
++    # whitespace-only record: 12 raw records, 2 blank, 10 data rows.
++    return write_source(tmp_path / "sales.csv")
++
++
++def only(stats: IngestionStats) -> FileStats:
++    assert len(stats.files) == 1
++    return stats.files[0]
++
++
++def assert_invariants(stats: IngestionStats) -> None:
++    for f in stats.files:
++        assert f.records_read - f.blank_rows == f.data_rows
++        assert f.records_restored <= f.records_read
++        assert f.resumed_from_checkpoint == (f.chunks_restored > 0)
++        assert not f.resumed_from_checkpoint or f.checkpointed
++        assert f.chunks_processed >= 0 and f.chunks_restored >= 0
++    assert stats.records_read == sum(f.records_read for f in stats.files)
++    assert stats.data_rows == sum(f.data_rows for f in stats.files)
++
++
++# --- load_files stays identical ---------------------------------------------------
++
++
++@pytest.mark.parametrize("chunk_size", [None, 1, 3, 100])
++def test_load_files_returns_the_same_frame_as_the_stats_variant(source, chunk_size):
++    config = Config(csv_chunk_size=chunk_size)
++    frame, stats = load_files_with_stats([source], config)
++    pd.testing.assert_frame_equal(load_files([source], config), frame)
++    assert_invariants(stats)
++
++
++# --- Whole-file, chunked and Excel reads --------------------------------------------
++
++
++def test_whole_file_csv_stats(source):
++    stats = only(load_files_with_stats([source], Config())[1])
++    assert stats.source_file == str(source)
++    assert stats.file_name == "sales.csv"
++    assert stats.file_format == "csv"
++    assert (stats.records_read, stats.blank_rows, stats.data_rows) == (12, 2, 10)
++    assert stats.chunked is False
++    assert stats.chunks_processed == 1
++    assert (stats.chunks_restored, stats.records_restored) == (0, 0)
++    assert stats.checkpointed is False
++    assert stats.resumed_from_checkpoint is False
++
++
++@pytest.mark.parametrize(("chunk_size", "chunks"), [(1, 12), (3, 4), (5, 3), (12, 1), (100, 1)])
++def test_chunked_csv_stats_match_whole_file_except_chunk_count(source, chunk_size, chunks):
++    whole = only(load_files_with_stats([source], Config())[1])
++    chunked = only(load_files_with_stats([source], Config(csv_chunk_size=chunk_size))[1])
++    assert chunked.chunked is True
++    assert chunked.chunks_processed == chunks
++    assert (chunked.records_read, chunked.blank_rows, chunked.data_rows) == (
++        whole.records_read,
++        whole.blank_rows,
++        whole.data_rows,
++    )
++    assert chunked.checkpointed is False and chunked.resumed_from_checkpoint is False
++
++
++def test_blank_rows_exactly_on_chunk_boundaries(tmp_path):
++    path = tmp_path / "sales.csv"
++    rows = ["date,product,category,quantity,unit_price"]
++    rows += ["2026-01-05,Laptop,Electronics,2,900", "", "", "2026-01-06,Mouse,Electronics,1,20", ""]
++    path.write_text("\n".join(rows) + "\n")
++    for size in (None, 1, 2, 3):
++        stats = only(load_files_with_stats([path], Config(csv_chunk_size=size))[1])
++        assert (stats.records_read, stats.blank_rows, stats.data_rows) == (5, 3, 2), size
++
++
++def test_excel_stats_are_never_chunked(tmp_path):
++    path = tmp_path / "sales.xlsx"
++    wb = Workbook()
++    ws = wb.active
++    ws.append(["Date", "Product", "Category", "Quantity", "Unit Price"])
++    ws.append(["2026-01-05", "Laptop", "Electronics", 2, 900])
++    ws.append([None, None, None, None, None])
++    ws.append(["2026-01-06", "Mouse", "Electronics", 1, 20])
++    wb.save(path)
++    config = Config(csv_chunk_size=1, csv_checkpoint_dir=str(tmp_path / "ckpt"))
++    stats = only(load_files_with_stats([path], config)[1])
++    assert stats.file_format == "xlsx"
++    assert (stats.records_read, stats.blank_rows, stats.data_rows) == (3, 1, 2)
++    assert stats.chunked is False
++    assert stats.chunks_processed == 1
++    assert stats.checkpointed is False
++    assert not (tmp_path / "ckpt").exists()
++
++
++def test_multiple_files_keep_input_order_and_names(source, tmp_path, monkeypatch):
++    monkeypatch.chdir(tmp_path)
++    relative = Path("sales.csv")
++    other = tmp_path / "other.csv"
++    other.write_text(
++        "date,product,category,quantity,unit_price,order_id\n2026-01-05,Laptop,E,2,900,X1\n\n"
++    )
++    frame, stats = load_files_with_stats([other, relative], Config(csv_chunk_size=4))
++    assert [f.source_file for f in stats.files] == [str(other), "sales.csv"]
++    assert [f.file_name for f in stats.files] == ["other.csv", "sales.csv"]
++    assert set(stats.by_source()) == set(frame["source_file"])
++    assert [f.chunks_processed for f in stats.files] == [1, 3]
++    assert (stats.records_read, stats.blank_rows, stats.data_rows) == (14, 3, 11)
++    assert stats.chunked_files == 2
++    assert (stats.checkpointed_files, stats.resumed_files) == (0, 0)
++    assert_invariants(stats)
++
++
++def test_errors_still_raise_before_any_statistics(tmp_path):
++    header_only = tmp_path / "empty.csv"
++    header_only.write_text("date,product,category,quantity,unit_price\n")
++    with pytest.raises(IngestionError, match="no data rows"):
++        load_files_with_stats([header_only], Config())
++    with pytest.raises(IngestionError, match="no data rows"):
++        load_files_with_stats([header_only], Config(csv_chunk_size=2))
++    with pytest.raises(IngestionError, match="at least one"):
++        load_files_with_stats([], Config())
++
++
++# --- Checkpoint and resume ------------------------------------------------------------
++
++
++@pytest.fixture
++def ckpt_config(tmp_path):
++    return Config(csv_chunk_size=3, csv_checkpoint_dir=str(tmp_path / "ckpt"))
++
++
++def test_fresh_checkpointed_run_is_not_a_resume(source, ckpt_config, tmp_path):
++    stats = only(load_files_with_stats([source], ckpt_config)[1])
++    assert stats.checkpointed is True
++    assert stats.resumed_from_checkpoint is False
++    assert (stats.chunks_processed, stats.chunks_restored, stats.records_restored) == (4, 0, 0)
++    assert (stats.records_read, stats.blank_rows, stats.data_rows) == (12, 2, 10)
++    assert not list((tmp_path / "ckpt").iterdir())
++
++
++@pytest.mark.parametrize("done", [1, 2, 3])
++def test_resumed_run_reports_restored_and_fresh_chunks(
++    source, ckpt_config, tmp_path, monkeypatch, done
++):
++    expected_frame, expected = load_files_with_stats([source], Config())
++    interrupt_after(monkeypatch, done)
++    with pytest.raises(KeyboardInterrupt):
++        load_files_with_stats([source], ckpt_config)
++    manifest = json.loads((checkpoint_folder(tmp_path) / MANIFEST).read_text())
++    assert len(manifest["chunks"]) == done
++    monkeypatch.undo()
++    frame, stats = load_files_with_stats([source], ckpt_config)
++    pd.testing.assert_frame_equal(frame, expected_frame)
++    resumed = only(stats)
++    assert resumed.resumed_from_checkpoint is True
++    assert resumed.checkpointed is True
++    assert resumed.chunks_restored == done
++    assert resumed.records_restored == sum(c["records"] for c in manifest["chunks"]) == 3 * done
++    assert resumed.chunks_processed == 4 - done
++    assert resumed.chunks_restored + resumed.chunks_processed == 4
++    assert (resumed.records_read, resumed.blank_rows, resumed.data_rows) == (
++        only(expected).records_read,
++        only(expected).blank_rows,
++        only(expected).data_rows,
++    )
++    assert stats.resumed_files == 1
++    assert_invariants(stats)
++    assert not list((tmp_path / "ckpt").iterdir())
++
++
++def test_fully_checkpointed_file_reads_no_records(source, ckpt_config, tmp_path, monkeypatch):
++    interrupt_before_completion(monkeypatch)
++    with pytest.raises(KeyboardInterrupt):
++        load_files_with_stats([source], ckpt_config)
++    monkeypatch.undo()
++    stats = only(load_files_with_stats([source], ckpt_config)[1])
++    assert (stats.chunks_restored, stats.chunks_processed) == (4, 0)
++    assert stats.records_restored == stats.records_read == 12
++    assert (stats.blank_rows, stats.data_rows) == (2, 10)
++    assert stats.resumed_from_checkpoint is True
++
++
++def test_discarded_checkpoint_counts_as_a_fresh_read(source, ckpt_config, tmp_path, monkeypatch):
++    interrupt_after(monkeypatch, 2)
++    with pytest.raises(KeyboardInterrupt):
++        load_files_with_stats([source], ckpt_config)
++    monkeypatch.undo()
++    folder = checkpoint_folder(tmp_path)
++    (folder / "chunk-000001.json").write_text("{corrupt")
++    stats = only(load_files_with_stats([source], ckpt_config)[1])
++    assert stats.resumed_from_checkpoint is False
++    assert (stats.chunks_restored, stats.records_restored, stats.chunks_processed) == (0, 0, 4)
++    assert (stats.records_read, stats.blank_rows, stats.data_rows) == (12, 2, 10)
++
++
++# --- Dataclass rendering ------------------------------------------------------------
++
++
++def test_stats_to_dict_keys_and_empty_totals(source):
++    stats = load_files_with_stats([source], Config(csv_chunk_size=5))[1]
++    payload = stats.to_dict()
++    assert payload == {
++        "files": 1,
++        "records_read": 12,
++        "blank_rows_skipped": 2,
++        "data_rows": 10,
++        "chunked_files": 1,
++        "chunks_processed": 3,
++        "chunks_restored": 0,
++        "checkpointed_files": 0,
++        "files_resumed_from_checkpoint": 0,
++    }
++    file_payload = stats.files[0].to_dict()
++    assert list(file_payload) == [
++        "source_file",
++        "file_name",
++        "format",
++        "records_read",
++        "blank_rows",
++        "data_rows",
++        "chunked",
++        "chunks_processed",
++        "chunks_restored",
++        "records_restored",
++        "checkpointed",
++        "resumed_from_checkpoint",
++    ]
++    assert file_payload["format"] == "csv" and file_payload["resumed_from_checkpoint"] is False
++    empty = IngestionStats([])
++    assert empty.to_dict()["records_read"] == 0 and empty.resumed_files == 0
++    assert empty.by_source() == {}
++
++
++# --- Quality report integration -----------------------------------------------------
++
++
++def test_quality_report_includes_ingestion_statistics(source):
++    config = Config(csv_chunk_size=3)
++    frame, stats = load_files_with_stats([source], config)
++    report = build_quality_report(validate(frame, config), config, ingestion=stats)
++    assert report.ingestion is stats
++    payload = report.to_dict()
++    assert payload["ingestion"] == stats.to_dict()
++    assert payload["ingestion"]["blank_rows_skipped"] == 2
++    assert payload["summary"]["input_rows"] == payload["ingestion"]["data_rows"] == 10
++    file_entry = payload["by_file"][0]
++    assert file_entry["input_rows"] == file_entry["ingestion"]["data_rows"]
++    assert file_entry["ingestion"]["chunks_processed"] == 4
++    assert report.files[0].ingestion is stats.files[0]
++
++
++def test_quality_report_without_statistics_is_unchanged(source):
++    config = Config()
++    frame, stats = load_files_with_stats([source], config)
++    validation = validate(frame, config)
++    without = build_quality_report(validation, config).to_dict()
++    with_stats = build_quality_report(validation, config, ingestion=stats).to_dict()
++    assert without["ingestion"] is None
++    assert without["by_file"][0]["ingestion"] is None
++    without.pop("ingestion"), with_stats.pop("ingestion")
++    for entry in without["by_file"] + with_stats["by_file"]:
++        entry.pop("ingestion")
++    assert without == with_stats
++
++
++def test_quality_report_rejects_statistics_for_unknown_files(source, tmp_path):
++    config = Config()
++    frame, stats = load_files_with_stats([source], config)
++    other = tmp_path / "other.csv"
++    other.write_text("date,product,category,quantity,unit_price\n2026-01-05,Laptop,E,2,900\n")
++    _, other_stats = load_files_with_stats([other], config)
++    with pytest.raises(ValueError, match="other.csv"):
++        build_quality_report(validate(frame, config), config, ingestion=other_stats)
++
++
++def test_partial_statistics_leave_other_files_without_ingestion(source, tmp_path):
++    other = tmp_path / "other.csv"
++    other.write_text(
++        "date,product,category,quantity,unit_price,order_id\n2026-01-05,Laptop,E,2,900,X1\n"
++    )
++    config = Config()
++    frame, stats = load_files_with_stats([source, other], config)
++    partial = IngestionStats([stats.files[0]])
++    report = build_quality_report(validate(frame, config), config, ingestion=partial)
++    assert report.files[0].ingestion is stats.files[0]
++    assert report.files[1].ingestion is None
++
++
++@pytest.mark.parametrize("chunk_size", [None, 1, 50, 10_000])
++def test_exported_quality_report_is_consistent_across_read_modes(chunk_size):
++    config = Config(csv_chunk_size=chunk_size)
++    frame, stats = load_files_with_stats([EXAMPLES / "sample_sales_dirty.csv"], config)
++    payload = build_quality_report(validate(frame, config), config, ingestion=stats).to_dict()
++    assert payload["ingestion"]["records_read"] == 357
++    assert payload["ingestion"]["blank_rows_skipped"] == 0
++    assert payload["summary"]["input_rows"] == 357
++    expected_chunks = 1 if chunk_size is None else -(-357 // chunk_size)
++    assert payload["ingestion"]["chunks_processed"] == expected_chunks
++    assert payload["by_file"][0]["ingestion"]["chunked"] is (chunk_size is not None)
++
++
++def test_cli_quality_summary_mentions_blank_rows_and_resume(source, tmp_path, monkeypatch, capsys):
++    output = tmp_path / "reports"
++    ckpt = tmp_path / "ckpt"
++    args = ["--input", str(source), "--output", str(output), "--format", "excel"]
++    args += ["--chunk-size", "3", "--checkpoint-dir", str(ckpt), "--quality-report"]
++    interrupt_after(monkeypatch, 2, error=RuntimeError)
++    with pytest.raises(RuntimeError):
++        main(args)
++    monkeypatch.undo()
++    assert main(args) == 0
++    out = capsys.readouterr().out
++    assert "; 2 blank row(s) skipped; 1 file(s) resumed from checkpoint" in out
++    exported = json.loads(next(output.rglob(FILENAME)).read_text(encoding="utf-8"))
++    assert exported["ingestion"]["files_resumed_from_checkpoint"] == 1
++    assert exported["ingestion"]["chunks_restored"] == 2
++    assert exported["ingestion"]["chunks_processed"] == 2
++    assert exported["by_file"][0]["ingestion"]["resumed_from_checkpoint"] is True
++    assert exported["by_file"][0]["ingestion"]["records_restored"] == 6
++    assert exported["summary"]["input_rows"] == 10
++    assert not list(ckpt.iterdir())
++    # A clean, uninterrupted run says nothing about blanks or checkpoints.
++    clean = tmp_path / "clean.csv"
++    clean.write_text("date,product,category,quantity,unit_price\n2026-01-05,Laptop,E,2,900\n")
++    assert main(["--input", str(clean), "--output", str(output), "--quality-report"]) == 0
++    assert "blank row" not in capsys.readouterr().out
+diff --git a/tests/test_quality.py b/tests/test_quality.py
+index 92adeff..91e0325 100644
+--- a/tests/test_quality.py
++++ b/tests/test_quality.py
+@@ -255,6 +255,7 @@ def test_to_dict_is_json_ready_and_deterministic(sales_file):
+         "policy",
+         "settings",
+         "summary",
++        "ingestion",
+         "dimensions",
+         "by_check",
+         "by_column",
+@@ -262,6 +263,8 @@ def test_to_dict_is_json_ready_and_deterministic(sales_file):
+         "top_reasons",
+     ]
+     assert payload["summary"]["invalid_rows"] == 1
++    assert payload["ingestion"] is None
++    assert all(f["ingestion"] is None for f in payload["by_file"])
+     assert all(isinstance(v, int) for k, v in payload["summary"].items() if "percent" not in k)
+     assert payload["by_check"][0]["examples"][0]["source_row"] == 2
+     assert payload["generated_at"] is not None
+diff --git a/tests/test_quality_pipeline.py b/tests/test_quality_pipeline.py
+index 0b8a11f..34b17d4 100644
+--- a/tests/test_quality_pipeline.py
++++ b/tests/test_quality_pipeline.py
+@@ -68,23 +68,29 @@ def test_report_uses_the_existing_validation_result_without_rereading(
+     sales_file, tmp_path, monkeypatch
+ ):
+     loads = []
+-    real_load = pipeline_module.load_files
++    real_load = pipeline_module.load_files_with_stats
+     real_build = pipeline_module.build_quality_report
+     seen = {}
+ 
+     def counting_load(paths, config):
+         loads.append(list(paths))
+-        return real_load(paths, config)
++        frame, stats = real_load(paths, config)
++        seen["stats"] = stats
++        return frame, stats
+ 
+     def recording_build(validation, config, generated_at=None, **kwargs):
+         seen["validation"] = validation
++        seen["ingestion"] = kwargs.get("ingestion")
+         return real_build(validation, config, generated_at, **kwargs)
+ 
+-    monkeypatch.setattr(pipeline_module, "load_files", counting_load)
++    monkeypatch.setattr(pipeline_module, "load_files_with_stats", counting_load)
+     monkeypatch.setattr(pipeline_module, "build_quality_report", recording_build)
+     run = run_pipeline([sales_file], tmp_path / "reports", Config(quality_report=True), "excel")
+     assert loads == [[sales_file]]
+     assert seen["validation"] is run.validation
++    # The reading statistics come from that single load, not from a second pass.
++    assert seen["ingestion"] is seen["stats"]
++    assert run.quality.ingestion is seen["stats"]
+ 
+ 
+ def test_enabling_the_report_does_not_change_validation_or_other_outputs(sales_file, tmp_path):

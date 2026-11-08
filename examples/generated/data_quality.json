@@ -1,0 +1,239 @@
+{
+  "schema_version": 1,
+  "toolkit_version": "1.0.0",
+  "generated_at": "2026-11-08T21:44:40.463468+00:00",
+  "policy": "quarantine",
+  "settings": {
+    "date_format": "%Y-%m-%d",
+    "csv_chunk_size": null,
+    "checkpointing": false
+  },
+  "summary": {
+    "files": 1,
+    "rejected_files": 0,
+    "input_rows": 357,
+    "accepted_rows": 350,
+    "invalid_rows": 7,
+    "excluded_rows": 7,
+    "accepted_percent": 98.04,
+    "invalid_percent": 1.96,
+    "excluded_percent": 1.96,
+    "total_issues": 7,
+    "rows_with_multiple_issues": 0
+  },
+  "ingestion": {
+    "files": 1,
+    "records_read": 357,
+    "blank_rows_skipped": 0,
+    "data_rows": 357,
+    "chunked_files": 0,
+    "chunks_processed": 1,
+    "chunks_restored": 0,
+    "checkpointed_files": 0,
+    "files_resumed_from_checkpoint": 0
+  },
+  "dimensions": {
+    "completeness": {
+      "rows": 2,
+      "percent": 0.56
+    },
+    "validity": {
+      "rows": 3,
+      "percent": 0.84
+    },
+    "uniqueness": {
+      "rows": 2,
+      "percent": 0.56
+    }
+  },
+  "by_check": [
+    {
+      "code": "duplicate_line",
+      "column": "",
+      "dimension": "uniqueness",
+      "description": "Duplicate of an earlier transaction line",
+      "rows": 2,
+      "percent_of_input": 0.56,
+      "examples": [
+        {
+          "source_file": "examples/sample_sales_dirty.csv",
+          "source_row": 357
+        },
+        {
+          "source_file": "examples/sample_sales_dirty.csv",
+          "source_row": 358
+        }
+      ]
+    },
+    {
+      "code": "invalid_date",
+      "column": "date",
+      "dimension": "validity",
+      "description": "Date does not match the configured format",
+      "rows": 1,
+      "percent_of_input": 0.28,
+      "examples": [
+        {
+          "source_file": "examples/sample_sales_dirty.csv",
+          "source_row": 352
+        }
+      ]
+    },
+    {
+      "code": "invalid_price",
+      "column": "unit_price",
+      "dimension": "validity",
+      "description": "Price must be non-negative with at most two decimal places",
+      "rows": 1,
+      "percent_of_input": 0.28,
+      "examples": [
+        {
+          "source_file": "examples/sample_sales_dirty.csv",
+          "source_row": 356
+        }
+      ]
+    },
+    {
+      "code": "invalid_quantity",
+      "column": "quantity",
+      "dimension": "validity",
+      "description": "Quantity must be a positive integer <= 1000000",
+      "rows": 1,
+      "percent_of_input": 0.28,
+      "examples": [
+        {
+          "source_file": "examples/sample_sales_dirty.csv",
+          "source_row": 353
+        }
+      ]
+    },
+    {
+      "code": "missing_value",
+      "column": "product",
+      "dimension": "completeness",
+      "description": "Required value is empty",
+      "rows": 1,
+      "percent_of_input": 0.28,
+      "examples": [
+        {
+          "source_file": "examples/sample_sales_dirty.csv",
+          "source_row": 355
+        }
+      ]
+    },
+    {
+      "code": "missing_value",
+      "column": "unit_price",
+      "dimension": "completeness",
+      "description": "Required value is empty",
+      "rows": 1,
+      "percent_of_input": 0.28,
+      "examples": [
+        {
+          "source_file": "examples/sample_sales_dirty.csv",
+          "source_row": 354
+        }
+      ]
+    }
+  ],
+  "by_column": [
+    {
+      "column": "date",
+      "missing": 0,
+      "invalid": 1,
+      "issue_rows": 1,
+      "complete_percent": 100.0
+    },
+    {
+      "column": "product",
+      "missing": 1,
+      "invalid": 0,
+      "issue_rows": 1,
+      "complete_percent": 99.72
+    },
+    {
+      "column": "category",
+      "missing": 0,
+      "invalid": 0,
+      "issue_rows": 0,
+      "complete_percent": 100.0
+    },
+    {
+      "column": "quantity",
+      "missing": 0,
+      "invalid": 1,
+      "issue_rows": 1,
+      "complete_percent": 100.0
+    },
+    {
+      "column": "unit_price",
+      "missing": 1,
+      "invalid": 1,
+      "issue_rows": 2,
+      "complete_percent": 99.72
+    },
+    {
+      "column": "order_id",
+      "missing": 0,
+      "invalid": 0,
+      "issue_rows": 0,
+      "complete_percent": 100.0
+    }
+  ],
+  "by_file": [
+    {
+      "source_file": "examples/sample_sales_dirty.csv",
+      "file_name": "sample_sales_dirty.csv",
+      "input_rows": 357,
+      "accepted_rows": 350,
+      "invalid_rows": 7,
+      "excluded_rows": 7,
+      "rejected": false,
+      "issues": 7,
+      "ingestion": {
+        "source_file": "examples/sample_sales_dirty.csv",
+        "file_name": "sample_sales_dirty.csv",
+        "format": "csv",
+        "records_read": 357,
+        "blank_rows": 0,
+        "data_rows": 357,
+        "chunked": false,
+        "chunks_processed": 1,
+        "chunks_restored": 0,
+        "records_restored": 0,
+        "checkpointed": false,
+        "resumed_from_checkpoint": false
+      }
+    }
+  ],
+  "top_reasons": [
+    {
+      "reason": "Duplicate transaction line (first occurrence: sample_sales_dirty.csv row 2)",
+      "rows": 1
+    },
+    {
+      "reason": "Duplicate transaction line (first occurrence: sample_sales_dirty.csv row 3)",
+      "rows": 1
+    },
+    {
+      "reason": "Invalid date (expected format %Y-%m-%d)",
+      "rows": 1
+    },
+    {
+      "reason": "Missing product",
+      "rows": 1
+    },
+    {
+      "reason": "Missing unit_price",
+      "rows": 1
+    },
+    {
+      "reason": "Price must be non-negative with at most two decimal places",
+      "rows": 1
+    },
+    {
+      "reason": "Quantity must be a positive integer <= 1000000",
+      "rows": 1
+    }
+  ]
+}

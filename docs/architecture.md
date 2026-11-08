@@ -7,7 +7,9 @@ flowchart TD
     Pipeline --> Ingestion[CSV and XLSX ingestion]
     Ingestion --> Validation[Cleaning and validation]
     Validation --> Analytics[Sales analytics]
+    Validation -.-> Quality[Data quality statistics]
     Analytics --> Reporting[Excel, PDF and charts]
+    Quality -.-> Reporting
     Reporting --> Publish[Staged run publication]
 ```
 
@@ -50,6 +52,18 @@ are skipped before validation and logged; they are neither counted as input rows
 nor treated as invalid, so they cannot trigger `reject_file`. Header cells that
 are blank (trailing delimiters, empty Excel columns) are ignored. Source row
 numbers always refer to the original file.
+
+Every failed check also carries a stable code (`missing_value`, `invalid_date`,
+`invalid_quantity`, `invalid_price`, `duplicate_line`) in `ValidationResult.checks`,
+one row per failed check with its source file, row and column. The optional data
+quality report (`processing/quality.py`) aggregates that frame by check, column,
+quality dimension and source file and renders a versioned, JSON-ready mapping; it
+is a pure function of the validation result and never rereads inputs or alters the
+outcome. The pipeline loads inputs through `load_files_with_stats`, whose
+`IngestionStats` (records read, blank rows skipped, chunks processed, chunks and
+records restored from a checkpoint) are attached to the report at run level and per
+file; `load_files` remains the plain wrapper. `reporting/quality_report.py` writes it as `data_quality.json` when
+`quality_report` is enabled.
 
 Schema or ingestion errors stop the whole run because the file cannot be
 interpreted reliably. The message names the file and the offending headers, for

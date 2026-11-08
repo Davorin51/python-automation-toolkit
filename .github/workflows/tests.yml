@@ -31,7 +31,7 @@ jobs:
       - name: Build distribution
         run: python -m build
       - name: CLI smoke test
-        run: python -m automation_toolkit --input examples/sample_sales_dirty.csv --output reports --format all --config config.yaml
+        run: python -m automation_toolkit --input examples/sample_sales_dirty.csv --output reports --format all --config config.yaml --quality-report
       - name: Upload reports and coverage
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4

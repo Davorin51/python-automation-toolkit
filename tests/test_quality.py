@@ -255,6 +255,7 @@ def test_to_dict_is_json_ready_and_deterministic(sales_file):
         "policy",
         "settings",
         "summary",
+        "ingestion",
         "dimensions",
         "by_check",
         "by_column",
@@ -262,6 +263,8 @@ def test_to_dict_is_json_ready_and_deterministic(sales_file):
         "top_reasons",
     ]
     assert payload["summary"]["invalid_rows"] == 1
+    assert payload["ingestion"] is None
+    assert all(f["ingestion"] is None for f in payload["by_file"])
     assert all(isinstance(v, int) for k, v in payload["summary"].items() if "percent" not in k)
     assert payload["by_check"][0]["examples"][0]["source_row"] == 2
     assert payload["generated_at"] is not None

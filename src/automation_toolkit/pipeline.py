@@ -13,12 +13,15 @@ from uuid import uuid4
 from automation_toolkit import __version__
 from automation_toolkit.config import Config
 from automation_toolkit.exceptions import ReportError, ValidationError
-from automation_toolkit.ingestion import load_files
+from automation_toolkit.ingestion import load_files_with_stats
 from automation_toolkit.processing.analytics import Analytics, analyze
+from automation_toolkit.processing.quality import QualityReport, build_quality_report
 from automation_toolkit.processing.validation import ValidationResult, validate
 from automation_toolkit.reporting.charts import generate_charts
 from automation_toolkit.reporting.excel_report import write_excel
 from automation_toolkit.reporting.pdf_report import write_pdf
+from automation_toolkit.reporting.quality_report import FILENAME as QUALITY_FILENAME
+from automation_toolkit.reporting.quality_report import write_quality_json
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,8 @@ class PipelineResult:
     output_dir: Path
     validation: ValidationResult
     analytics: Analytics
+    #: Present only when ``config.quality_report`` is enabled.
+    quality: QualityReport | None = None
 
 
 def run_pipeline(
@@ -36,7 +41,8 @@ def run_pipeline(
     config = config or Config()
     if report_format not in {"all", "excel", "pdf", "charts"}:
         raise ReportError("Report format must be all, excel, pdf or charts.")
-    validation = validate(load_files(inputs, config), config)
+    frame, ingestion = load_files_with_stats(inputs, config)
+    validation = validate(frame, config)
     if validation.transactions.empty:
         raise ValidationError(
             f"No valid transactions remain: {validation.invalid_rows} invalid "
@@ -45,6 +51,13 @@ def run_pipeline(
         )
     metrics = analyze(validation.transactions)
     generated_at = datetime.now(UTC)
+    # The report is derived from the validation result already in hand; inputs are not
+    # read a second time and the validation outcome is not affected.
+    quality = (
+        build_quality_report(validation, config, generated_at, ingestion=ingestion)
+        if config.quality_report
+        else None
+    )
     staging = None
     try:
         output.mkdir(parents=True, exist_ok=True)
@@ -64,6 +77,8 @@ def run_pipeline(
         validation.errors.to_json(
             staging / "validation_errors.json", orient="records", indent=2, date_format="iso"
         )
+        if quality is not None:
+            write_quality_json(staging / QUALITY_FILENAME, quality)
         sources = []
         for source in inputs:
             with source.open("rb") as stream:
@@ -95,4 +110,4 @@ def run_pipeline(
             shutil.rmtree(staging, ignore_errors=True)
         raise ReportError(f"Cannot publish reports in {output}: {exc}") from exc
     logger.info("Published reports to %s; %s rows excluded", target, validation.excluded_rows)
-    return PipelineResult(target, validation, metrics)
+    return PipelineResult(target, validation, metrics, quality)

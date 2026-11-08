@@ -1,6 +1,9 @@
 # Data quality reporting: analysis and implementation plan
 
-Status: proposal, nothing implemented yet. This document records what the current
+Status: check codes, the QualityReport model, ingestion statistics
+(`load_files_with_stats`), the JSON export and the CLI flag are implemented behind
+the opt-in `quality_report` setting. Still open: the validation-only `quality`
+format, the quality gate, `--quality-json`, and Excel/PDF integration (section 7). This document records what the current
 code does, where the extension points are, and the changes I would make to add a
 backward compatible data quality reporting option with validation statistics,
 error summaries and a JSON export. Decisions that need your input are collected

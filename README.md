@@ -17,6 +17,7 @@ Built as a portfolio example of modular Python automation with tests and CI.
 - [Three-page PDF report](examples/generated/sales_report.pdf)
 - [Excel workbook with eight worksheets](examples/generated/sales_report.xlsx)
 - [Validation diagnostics](examples/generated/validation_errors.json)
+- [Data quality report](examples/generated/data_quality.json)
 - [Run manifest and source checksum](examples/generated/manifest.json)
 - [Excel dashboard preview](docs/screenshots/excel-dashboard.png)
 
@@ -35,6 +36,7 @@ performs that batch workflow and keeps rejected-row diagnostics for review.
 | Large CSV exports | Optional incremental reading in configurable chunks, with checkpoint and resume |
 | Data quality | Invalid dates, missing fields, negative/fractional quantities, invalid prices, duplicates |
 | Validation policy | Quarantine raw rows, skip with diagnostics, or reject the entire affected file |
+| Data quality report | Optional `data_quality.json` with statistics by check, column, dimension and source file |
 | Business metrics | Revenue, orders, average order value, units, category/product breakdowns |
 | Trends | Calendar months, Sunday-ending weeks and month-over-month percentage change |
 | Excel reports | Summary, Transactions, Categories, Products, Monthly Trends, Weekly Trends, Period Comparison, Validation Errors |
@@ -69,6 +71,8 @@ python -m automation_toolkit --input examples/sample_sales_dirty.csv --output re
 
 The command prints a completed run folder under `reports/`. It contains an Excel
 workbook, a PDF, four PNG charts, `validation_errors.json` and `manifest.json`.
+With `--quality-report` (or `quality_report: true`) it also contains
+`data_quality.json`, a summary of the validation outcome by check, column and file.
 Repeated runs create separate folders and preserve earlier reports.
 
 The plain install above contains only the runtime dependencies. Running the test
@@ -106,6 +110,9 @@ automation-toolkit --input big_export.csv --output reports --format excel --chun
 
 # Also record progress so an interrupted run resumes at the next chunk
 automation-toolkit --input big_export.csv --output reports --chunk-size 50000 --checkpoint-dir .checkpoints
+
+# Also export validation statistics (by check, column and file) as data_quality.json
+automation-toolkit --input examples/sample_sales_dirty.csv --output reports --format excel --quality-report
 
 # Install and launch the optional desktop application
 python -m pip install -e '.[gui]'
