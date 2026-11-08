@@ -1,0 +1,838 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 50217c5..0f25d67 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,19 @@
+ 
+ ## Unreleased
+ 
++- Add stable validation check identifiers (`missing_value`, `invalid_date`,
++  `invalid_quantity`, `invalid_price`, `duplicate_line`) and a new
++  `ValidationResult.checks` frame with one row per failed check
++  (`source_file`, `source_row`, `code`, `column`), so statistics no longer depend on
++  parsing the human-readable reason text. Existing validation behavior, the `errors`
++  frame and `validation_errors.json` are unchanged.
++- Add `ValidationResult.file_rows` recording the validated input rows per source file.
++- Add `processing/quality.py` with a `QualityReport` model and `build_quality_report`,
++  aggregating validation statistics by check, by business column, by quality dimension
++  (completeness, validity, uniqueness) and by source file, plus run-level counts,
++  percentages and the most common reasons. `QualityReport.to_dict` renders a
++  deterministic, JSON-ready mapping. CLI integration and file export follow separately.
++
+ - Add incremental CSV processing: the `csv_chunk_size` setting and `--chunk-size`
+   CLI flag read CSV inputs in fixed-size chunks through the new
+   `iter_csv_chunks` generator, producing the same frame, `source_row` numbers and
+diff --git a/src/automation_toolkit/processing/quality.py b/src/automation_toolkit/processing/quality.py
+new file mode 100644
+index 0000000..ea7e6be
+--- /dev/null
++++ b/src/automation_toolkit/processing/quality.py
+@@ -0,0 +1,334 @@
++"""Aggregated data-quality statistics derived from one validation run.
++
++The model is a pure function of a :class:`~automation_toolkit.processing.validation.
++ValidationResult` and the configuration: it never rereads inputs and never changes the
++validation outcome. Statistics are grouped by check code, by business column and by
++source file, and :meth:`QualityReport.to_dict` renders a JSON-ready mapping with plain
++Python scalars so a later export or CLI summary can use it unchanged.
++"""
++
++from dataclasses import dataclass, field
++from datetime import datetime
++from pathlib import Path
++from typing import Any
++
++import pandas as pd
++
++from automation_toolkit import __version__
++from automation_toolkit.config import Config
++from automation_toolkit.ingestion import REQUIRED
++from automation_toolkit.processing.validation import (
++    CHECK_DESCRIPTIONS,
++    CHECK_DIMENSIONS,
++    MISSING_VALUE,
++    ValidationResult,
++)
++
++#: Incremented when the rendered mapping changes in a way consumers must notice.
++SCHEMA_VERSION = 1
++DIMENSIONS = ("completeness", "validity", "uniqueness")
++EXAMPLE_LIMIT = 5
++TOP_REASON_LIMIT = 10
++
++
++def _percent(part: int, total: int) -> float:
++    """A rounded percentage; zero input rows give ``0.0`` rather than an error."""
++    return round(100.0 * part / total, 2) if total else 0.0
++
++
++@dataclass(frozen=True)
++class CheckSummary:
++    """How often one check failed, and where."""
++
++    code: str
++    column: str
++    dimension: str
++    description: str
++    rows: int
++    percent_of_input: float
++    examples: list[dict[str, Any]] = field(default_factory=list)
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "code": self.code,
++            "column": self.column,
++            "dimension": self.dimension,
++            "description": self.description,
++            "rows": self.rows,
++            "percent_of_input": self.percent_of_input,
++            "examples": [dict(example) for example in self.examples],
++        }
++
++
++@dataclass(frozen=True)
++class ColumnSummary:
++    """Per-business-column completeness and validity."""
++
++    column: str
++    missing: int
++    invalid: int
++    issue_rows: int
++    complete_percent: float
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "column": self.column,
++            "missing": self.missing,
++            "invalid": self.invalid,
++            "issue_rows": self.issue_rows,
++            "complete_percent": self.complete_percent,
++        }
++
++
++@dataclass(frozen=True)
++class FileSummary:
++    """Per-source-file row accounting, including whole-file rejection."""
++
++    source_file: str
++    file_name: str
++    input_rows: int
++    accepted_rows: int
++    invalid_rows: int
++    excluded_rows: int
++    rejected: bool
++    issues: int
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "source_file": self.source_file,
++            "file_name": self.file_name,
++            "input_rows": self.input_rows,
++            "accepted_rows": self.accepted_rows,
++            "invalid_rows": self.invalid_rows,
++            "excluded_rows": self.excluded_rows,
++            "rejected": self.rejected,
++            "issues": self.issues,
++        }
++
++
++@dataclass(frozen=True)
++class QualitySummary:
++    """Run-level counts. ``total_issues`` counts failed checks, not rows."""
++
++    files: int
++    rejected_files: int
++    input_rows: int
++    accepted_rows: int
++    invalid_rows: int
++    excluded_rows: int
++    accepted_percent: float
++    invalid_percent: float
++    excluded_percent: float
++    total_issues: int
++    rows_with_multiple_issues: int
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "files": self.files,
++            "rejected_files": self.rejected_files,
++            "input_rows": self.input_rows,
++            "accepted_rows": self.accepted_rows,
++            "invalid_rows": self.invalid_rows,
++            "excluded_rows": self.excluded_rows,
++            "accepted_percent": self.accepted_percent,
++            "invalid_percent": self.invalid_percent,
++            "excluded_percent": self.excluded_percent,
++            "total_issues": self.total_issues,
++            "rows_with_multiple_issues": self.rows_with_multiple_issues,
++        }
++
++
++@dataclass(frozen=True)
++class QualityReport:
++    """The complete data-quality picture of one validation run."""
++
++    summary: QualitySummary
++    dimensions: dict[str, dict[str, Any]]
++    checks: list[CheckSummary]
++    columns: list[ColumnSummary]
++    files: list[FileSummary]
++    top_reasons: list[dict[str, Any]]
++    policy: str
++    settings: dict[str, Any]
++    generated_at: datetime | None = None
++    schema_version: int = SCHEMA_VERSION
++    toolkit_version: str = __version__
++
++    def to_dict(self) -> dict[str, Any]:
++        """A JSON-ready mapping of plain scalars, deterministic for identical input."""
++        return {
++            "schema_version": self.schema_version,
++            "toolkit_version": self.toolkit_version,
++            "generated_at": self.generated_at.isoformat() if self.generated_at else None,
++            "policy": self.policy,
++            "settings": dict(self.settings),
++            "summary": self.summary.to_dict(),
++            "dimensions": {name: dict(value) for name, value in self.dimensions.items()},
++            "by_check": [check.to_dict() for check in self.checks],
++            "by_column": [column.to_dict() for column in self.columns],
++            "by_file": [file.to_dict() for file in self.files],
++            "top_reasons": [dict(reason) for reason in self.top_reasons],
++        }
++
++
++def _business_columns(validation: ValidationResult) -> list[str]:
++    """The required fields, plus ``order_id`` when the run carries one."""
++    known = set(validation.transactions.columns) | set(validation.errors.columns)
++    if not validation.checks.empty:
++        known |= set(validation.checks["column"])
++    return [*REQUIRED, *(["order_id"] if "order_id" in known else [])]
++
++
++def _examples(checks: pd.DataFrame, limit: int) -> list[dict[str, Any]]:
++    """Up to ``limit`` locations, ordered by file and row so the output is diff-stable."""
++    ordered = checks.sort_values(["source_file", "source_row"], kind="stable").head(limit)
++    return [
++        {"source_file": str(row.source_file), "source_row": int(row.source_row)}
++        for row in ordered.itertuples(index=False)
++    ]
++
++
++def _check_summaries(
++    checks: pd.DataFrame, input_rows: int, example_limit: int
++) -> list[CheckSummary]:
++    if checks.empty:
++        return []
++    summaries = [
++        CheckSummary(
++            code=str(code),
++            column=str(column),
++            dimension=CHECK_DIMENSIONS.get(str(code), "validity"),
++            description=CHECK_DESCRIPTIONS.get(str(code), str(code)),
++            rows=len(group),
++            percent_of_input=_percent(len(group), input_rows),
++            examples=_examples(group, example_limit),
++        )
++        for (code, column), group in checks.groupby(["code", "column"], sort=False)
++    ]
++    # Most frequent first; ties resolve by code and column so the order never depends on
++    # the order rows happened to arrive in.
++    return sorted(summaries, key=lambda s: (-s.rows, s.code, s.column))
++
++
++def _column_summaries(
++    checks: pd.DataFrame, columns: list[str], input_rows: int
++) -> list[ColumnSummary]:
++    summaries = []
++    for column in columns:
++        hits = checks[checks["column"] == column] if not checks.empty else checks
++        missing = int((hits["code"] == MISSING_VALUE).sum()) if not hits.empty else 0
++        summaries.append(
++            ColumnSummary(
++                column=column,
++                missing=missing,
++                invalid=len(hits) - missing,
++                issue_rows=int(hits[["source_file", "source_row"]].drop_duplicates().shape[0])
++                if not hits.empty
++                else 0,
++                complete_percent=_percent(input_rows - missing, input_rows),
++            )
++        )
++    return summaries
++
++
++def _file_summaries(validation: ValidationResult, checks: pd.DataFrame) -> list[FileSummary]:
++    rejected = set(validation.rejected_files)
++    invalid_per_file = (
++        validation.errors["source_file"].value_counts() if len(validation.errors) else pd.Series()
++    )
++    issues_per_file = checks["source_file"].value_counts() if not checks.empty else pd.Series()
++    summaries = []
++    for source, rows in validation.file_rows.items():
++        invalid = int(invalid_per_file.get(source, 0))
++        # Under reject_file every row of an affected file is excluded, including its
++        # valid ones; under the other policies only the invalid rows are.
++        excluded = rows if source in rejected else invalid
++        summaries.append(
++            FileSummary(
++                source_file=source,
++                file_name=Path(source).name,
++                input_rows=rows,
++                accepted_rows=rows - excluded,
++                invalid_rows=invalid,
++                excluded_rows=excluded,
++                rejected=source in rejected,
++                issues=int(issues_per_file.get(source, 0)),
++            )
++        )
++    return summaries
++
++
++def _dimensions(checks: pd.DataFrame, input_rows: int) -> dict[str, dict[str, Any]]:
++    """Distinct affected rows per quality dimension.
++
++    A row failing checks in two dimensions counts in both, so these totals can add up to
++    more than ``invalid_rows``.
++    """
++    result = {}
++    for dimension in DIMENSIONS:
++        if checks.empty:
++            rows = 0
++        else:
++            codes = [c for c, d in CHECK_DIMENSIONS.items() if d == dimension]
++            hits = checks[checks["code"].isin(codes)]
++            rows = int(hits[["source_file", "source_row"]].drop_duplicates().shape[0])
++        result[dimension] = {"rows": rows, "percent": _percent(rows, input_rows)}
++    return result
++
++
++def _top_reasons(errors: pd.DataFrame, limit: int) -> list[dict[str, Any]]:
++    """The most common verbatim reason texts, reconcilable with the error diagnostics."""
++    if not len(errors):
++        return []
++    counts = errors["reason"].value_counts()
++    ordered = sorted(counts.items(), key=lambda item: (-item[1], str(item[0])))
++    return [{"reason": str(reason), "rows": int(rows)} for reason, rows in ordered[:limit]]
++
++
++def build_quality_report(
++    validation: ValidationResult,
++    config: Config,
++    generated_at: datetime | None = None,
++    example_limit: int = EXAMPLE_LIMIT,
++    top_reason_limit: int = TOP_REASON_LIMIT,
++) -> QualityReport:
++    """Summarize ``validation`` by check, column and source file.
++
++    Percentages use the validated input rows (blank rows already removed) as the
++    denominator and are rounded to two decimals; with no input rows they are ``0.0``.
++    """
++    checks = validation.checks
++    input_rows = validation.input_rows
++    if not checks.empty:
++        per_row = checks.groupby(["source_file", "source_row"], sort=False).size()
++        multiple = int((per_row > 1).sum())
++    else:
++        multiple = 0
++    summary = QualitySummary(
++        files=len(validation.file_rows),
++        rejected_files=len(validation.rejected_files),
++        input_rows=input_rows,
++        accepted_rows=len(validation.transactions),
++        invalid_rows=validation.invalid_rows,
++        excluded_rows=validation.excluded_rows,
++        accepted_percent=_percent(len(validation.transactions), input_rows),
++        invalid_percent=_percent(validation.invalid_rows, input_rows),
++        excluded_percent=_percent(validation.excluded_rows, input_rows),
++        total_issues=len(checks),
++        rows_with_multiple_issues=multiple,
++    )
++    return QualityReport(
++        summary=summary,
++        dimensions=_dimensions(checks, input_rows),
++        checks=_check_summaries(checks, input_rows, example_limit),
++        columns=_column_summaries(checks, _business_columns(validation), input_rows),
++        files=_file_summaries(validation, checks),
++        top_reasons=_top_reasons(validation.errors, top_reason_limit),
++        policy=config.validation_policy,
++        settings={
++            "date_format": config.date_format,
++            "csv_chunk_size": config.csv_chunk_size,
++            "checkpointing": config.csv_checkpoint_dir is not None,
++        },
++        generated_at=generated_at,
++    )
+diff --git a/src/automation_toolkit/processing/validation.py b/src/automation_toolkit/processing/validation.py
+index 8819392..a37758e 100644
+--- a/src/automation_toolkit/processing/validation.py
++++ b/src/automation_toolkit/processing/validation.py
+@@ -1,6 +1,6 @@
+ """Vectorized checks with raw-value quarantine and source-row provenance."""
+ 
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ from datetime import date, datetime
+ from pathlib import Path
+ 
+@@ -14,6 +14,47 @@ from automation_toolkit.processing.cleaning import clean_text
+ QUANTITY_RULE = "Quantity must be a positive integer <= 1000000"
+ PRICE_RULE = "Price must be non-negative with at most two decimal places"
+ 
++# Stable identifiers for the failed checks. The human-readable ``reason`` text may change
++# with the configuration (date format) or the data (first occurrence of a duplicate), so
++# these codes, not the messages, are what statistics and downstream tools group by.
++MISSING_VALUE = "missing_value"
++INVALID_DATE = "invalid_date"
++INVALID_QUANTITY = "invalid_quantity"
++INVALID_PRICE = "invalid_price"
++DUPLICATE_LINE = "duplicate_line"
++
++# Quality dimension each check belongs to.
++CHECK_DIMENSIONS = {
++    MISSING_VALUE: "completeness",
++    INVALID_DATE: "validity",
++    INVALID_QUANTITY: "validity",
++    INVALID_PRICE: "validity",
++    DUPLICATE_LINE: "uniqueness",
++}
++
++# Configuration-independent descriptions, unlike the per-row ``reason`` text.
++CHECK_DESCRIPTIONS = {
++    MISSING_VALUE: "Required value is empty",
++    INVALID_DATE: "Date does not match the configured format",
++    INVALID_QUANTITY: QUANTITY_RULE,
++    INVALID_PRICE: PRICE_RULE,
++    DUPLICATE_LINE: "Duplicate of an earlier transaction line",
++}
++
++CHECK_COLUMNS = ["source_file", "source_row", "code", "column"]
++
++
++def empty_checks() -> pd.DataFrame:
++    """An empty per-check frame with the documented columns and dtypes."""
++    return pd.DataFrame(
++        {
++            "source_file": pd.Series(dtype="object"),
++            "source_row": pd.Series(dtype="int64"),
++            "code": pd.Series(dtype="object"),
++            "column": pd.Series(dtype="object"),
++        }
++    )
++
+ 
+ @dataclass
+ class ValidationResult:
+@@ -23,6 +64,12 @@ class ValidationResult:
+     invalid_rows: int
+     excluded_rows: int
+     rejected_files: list[str]
++    #: One row per failed check: ``source_file``, ``source_row``, ``code``, ``column``.
++    #: A row failing several checks appears once per check, in rule-evaluation order;
++    #: ``column`` is empty for row-level checks such as duplicates.
++    checks: pd.DataFrame = field(default_factory=empty_checks)
++    #: Input rows per source file, in the order the files first appear.
++    file_rows: dict[str, int] = field(default_factory=dict)
+ 
+ 
+ def _is_blank(series: pd.Series) -> pd.Series:
+@@ -40,14 +87,22 @@ def validate(frame: pd.DataFrame, config: Config) -> ValidationResult:
+     raw = frame.reset_index(drop=True).copy()
+     reasons = pd.Series("", index=data.index, dtype="string")
+     columns_hit = pd.Series("", index=data.index, dtype="string")
++    recorded: list[tuple[str, str, pd.Series]] = []
+ 
+-    def flag(mask: pd.Series, message: str | pd.Series, column: str) -> None:
++    def flag(
++        mask: pd.Series,
++        message: str | pd.Series,
++        column: str,
++        code: str,
++        check_column: str | None = None,
++    ) -> None:
+         mask = mask.fillna(True).astype(bool)
+         if not mask.any():
+             return
+         reasons.loc[mask] += message.loc[mask] if isinstance(message, pd.Series) else message
+         reasons.loc[mask] += "; "
+         columns_hit.loc[mask] += column + "; "
++        recorded.append((code, column if check_column is None else check_column, mask))
+ 
+     for column in ["date", "quantity", "unit_price"]:
+         data[column] = _strip_text(data[column])
+@@ -56,11 +111,12 @@ def validate(frame: pd.DataFrame, config: Config) -> ValidationResult:
+     data["date"] = pd.to_datetime(
+         data["date"].where(date_types), format=config.date_format, errors="coerce"
+     )
+-    flag(blank_date, "Missing date", "date")
++    flag(blank_date, "Missing date", "date", MISSING_VALUE)
+     flag(
+         data["date"].isna() & ~blank_date,
+         f"Invalid date (expected format {config.date_format})",
+         "date",
++        INVALID_DATE,
+     )
+     # Currency is converted once to cents. Reject fractional cents and non-finite values.
+     blank_quantity = _is_blank(data["quantity"])
+@@ -73,14 +129,14 @@ def validate(frame: pd.DataFrame, config: Config) -> ValidationResult:
+     p_valid = np.isfinite(price) & price.ge(0) & scaled.le(1_000_000_000_000)
+     price_text = data["unit_price"].astype("string").str.strip()
+     p_valid &= price_text.str.fullmatch(r"\+?(?:\d+(?:\.\d{1,2})?|\.\d{1,2})").fillna(False)
+-    flag(blank_quantity, "Missing quantity", "quantity")
+-    flag(~q_valid & ~blank_quantity, QUANTITY_RULE, "quantity")
+-    flag(blank_price, "Missing unit_price", "unit_price")
+-    flag(~p_valid & ~blank_price, PRICE_RULE, "unit_price")
++    flag(blank_quantity, "Missing quantity", "quantity", MISSING_VALUE)
++    flag(~q_valid & ~blank_quantity, QUANTITY_RULE, "quantity", INVALID_QUANTITY)
++    flag(blank_price, "Missing unit_price", "unit_price", MISSING_VALUE)
++    flag(~p_valid & ~blank_price, PRICE_RULE, "unit_price", INVALID_PRICE)
+     data["quantity"] = quantity.where(q_valid).round().astype("Int64")
+     data["unit_price_cents"] = scaled.where(p_valid).round().astype("Int64")
+     for column in ["product", "category"] + (["order_id"] if "order_id" in data else []):
+-        flag(data[column].eq(""), f"Missing {column}", column)
++        flag(data[column].eq(""), f"Missing {column}", column, MISSING_VALUE)
+     # Only valid rows participate: a bad first occurrence must not suppress a later valid row.
+     valid = reasons.eq("")
+     keys = ["date", "product", "category", "quantity", "unit_price_cents"]
+@@ -103,6 +159,10 @@ def validate(frame: pd.DataFrame, config: Config) -> ValidationResult:
+             duplicates,
+             message.reindex(data.index),
+             "; ".join(k.removesuffix("_cents") for k in keys),
++            DUPLICATE_LINE,
++            # A duplicate is a property of the whole line, not of one column, so it is
++            # not attributed to any single column in the per-check statistics.
++            check_column="",
+         )
+     invalid = reasons.ne("")
+     rejected = (
+@@ -124,6 +184,8 @@ def validate(frame: pd.DataFrame, config: Config) -> ValidationResult:
+         raise ValueError("Total revenue exceeds supported integer-cent range.")
+     good["unit_price"] = good["unit_price_cents"] / 100
+     good["revenue"] = good["revenue_cents"] / 100
++    counts = raw["source_file"].value_counts(sort=False)
++    file_rows = {str(name): int(counts[name]) for name in raw["source_file"].drop_duplicates()}
+     return ValidationResult(
+         good.reset_index(drop=True),
+         errors.reset_index(drop=True),
+@@ -131,4 +193,22 @@ def validate(frame: pd.DataFrame, config: Config) -> ValidationResult:
+         int(invalid.sum()),
+         int(excluded.sum()),
+         rejected,
++        _checks_frame(raw, recorded),
++        file_rows,
+     )
++
++
++def _checks_frame(raw: pd.DataFrame, recorded: list[tuple[str, str, pd.Series]]) -> pd.DataFrame:
++    """One row per failed check, ordered by input row and then by rule-evaluation order."""
++    parts = []
++    for code, column, mask in recorded:
++        part = raw.loc[mask, ["source_file", "source_row"]].copy()
++        part["code"] = code
++        part["column"] = column
++        parts.append(part)
++    if not parts:
++        return empty_checks()
++    # A stable sort keeps the checks of one row in the order the rules ran, which is the
++    # same order as the parts of its ``reason`` text.
++    frame = pd.concat(parts).sort_index(kind="stable").reset_index(drop=True)
++    return frame.astype({"source_row": "int64", "code": "object", "column": "object"})
+diff --git a/tests/test_quality.py b/tests/test_quality.py
+new file mode 100644
+index 0000000..92adeff
+--- /dev/null
++++ b/tests/test_quality.py
+@@ -0,0 +1,294 @@
++"""Data-quality statistics: clean data, several issues per row and invalid records."""
++
++import json
++from datetime import UTC, datetime
++from pathlib import Path
++
++import pandas as pd
++import pytest
++
++from automation_toolkit.config import Config
++from automation_toolkit.ingestion import load_files
++from automation_toolkit.processing.quality import SCHEMA_VERSION, build_quality_report
++from automation_toolkit.processing.validation import (
++    DUPLICATE_LINE,
++    INVALID_DATE,
++    INVALID_PRICE,
++    INVALID_QUANTITY,
++    MISSING_VALUE,
++    validate,
++)
++
++EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
++
++
++def report_for(frame: pd.DataFrame, config: Config | None = None):
++    config = config or Config()
++    return build_quality_report(validate(frame, config), config)
++
++
++def counts_by_check(report) -> dict[tuple[str, str], int]:
++    return {(c.code, c.column): c.rows for c in report.checks}
++
++
++# --- Clean data ------------------------------------------------------------------
++
++
++def test_clean_data_reports_no_issues(sales_file):
++    report = report_for(load_files([sales_file], Config()))
++    assert report.summary.input_rows == 3
++    assert report.summary.accepted_rows == 3
++    assert report.summary.invalid_rows == 0
++    assert report.summary.excluded_rows == 0
++    assert report.summary.accepted_percent == 100.0
++    assert report.summary.invalid_percent == 0.0
++    assert report.summary.total_issues == 0
++    assert report.summary.rows_with_multiple_issues == 0
++    assert report.checks == []
++    assert report.top_reasons == []
++    assert all(d == {"rows": 0, "percent": 0.0} for d in report.dimensions.values())
++    assert [c.column for c in report.columns] == [
++        "date",
++        "product",
++        "category",
++        "quantity",
++        "unit_price",
++        "order_id",
++    ]
++    assert all(c.complete_percent == 100.0 and c.issue_rows == 0 for c in report.columns)
++
++
++def test_clean_data_without_order_id_omits_the_column(sales_file):
++    raw = load_files([sales_file], Config()).drop(columns="order_id")
++    report = report_for(raw)
++    assert [c.column for c in report.columns] == [
++        "date",
++        "product",
++        "category",
++        "quantity",
++        "unit_price",
++    ]
++
++
++# --- Several issues in one row ---------------------------------------------------
++
++
++def test_multiple_issues_in_one_row_are_counted_per_check(sales_file):
++    raw = load_files([sales_file], Config())
++    raw.loc[0, ["date", "quantity", "unit_price", "product"]] = ["nope", "x", "", " "]
++    report = report_for(raw)
++    assert report.summary.invalid_rows == 1
++    assert report.summary.total_issues == 4
++    assert report.summary.rows_with_multiple_issues == 1
++    assert counts_by_check(report) == {
++        (INVALID_DATE, "date"): 1,
++        (INVALID_QUANTITY, "quantity"): 1,
++        (MISSING_VALUE, "unit_price"): 1,
++        (MISSING_VALUE, "product"): 1,
++    }
++    assert report.dimensions["completeness"] == {"rows": 1, "percent": 33.33}
++    assert report.dimensions["validity"] == {"rows": 1, "percent": 33.33}
++    assert report.dimensions["uniqueness"] == {"rows": 0, "percent": 0.0}
++
++
++def test_checks_follow_the_reason_order_for_one_row(sales_file):
++    raw = load_files([sales_file], Config())
++    raw.loc[0, ["date", "quantity", "unit_price", "product"]] = ["nope", "x", "", " "]
++    result = validate(raw, Config())
++    assert result.checks["code"].tolist() == [
++        INVALID_DATE,
++        INVALID_QUANTITY,
++        MISSING_VALUE,
++        MISSING_VALUE,
++    ]
++    assert result.checks["column"].tolist() == ["date", "quantity", "unit_price", "product"]
++    assert result.checks["source_row"].tolist() == [2, 2, 2, 2]
++    assert result.errors.reason.iloc[0].count("; ") == 3
++
++
++def test_column_summary_separates_missing_from_invalid(sales_file):
++    raw = load_files([sales_file], Config())
++    raw.loc[0, "unit_price"] = ""
++    raw.loc[1, "unit_price"] = "1.234"
++    report = report_for(raw)
++    price = next(c for c in report.columns if c.column == "unit_price")
++    assert (price.missing, price.invalid, price.issue_rows) == (1, 1, 2)
++    assert price.complete_percent == 66.67
++    date = next(c for c in report.columns if c.column == "date")
++    assert (date.missing, date.invalid, date.complete_percent) == (0, 0, 100.0)
++
++
++# --- Invalid records across the dirty fixture ------------------------------------
++
++
++def test_dirty_fixture_statistics_by_check_and_dimension():
++    report = report_for(load_files([EXAMPLES / "sample_sales_dirty.csv"], Config()))
++    assert report.summary.input_rows == 357
++    assert report.summary.accepted_rows == 350
++    assert report.summary.invalid_rows == 7
++    assert report.summary.excluded_rows == 7
++    assert report.summary.total_issues == 7
++    assert report.summary.rows_with_multiple_issues == 0
++    assert report.summary.accepted_percent == 98.04
++    assert report.summary.invalid_percent == 1.96
++    assert counts_by_check(report) == {
++        (DUPLICATE_LINE, ""): 2,
++        (INVALID_DATE, "date"): 1,
++        (INVALID_PRICE, "unit_price"): 1,
++        (INVALID_QUANTITY, "quantity"): 1,
++        (MISSING_VALUE, "product"): 1,
++        (MISSING_VALUE, "unit_price"): 1,
++    }
++    # Most frequent check first, then alphabetically by code.
++    assert [c.code for c in report.checks][0] == DUPLICATE_LINE
++    assert report.dimensions == {
++        "completeness": {"rows": 2, "percent": 0.56},
++        "validity": {"rows": 3, "percent": 0.84},
++        "uniqueness": {"rows": 2, "percent": 0.56},
++    }
++    duplicates = next(c for c in report.checks if c.code == DUPLICATE_LINE)
++    assert duplicates.dimension == "uniqueness"
++    assert [e["source_row"] for e in duplicates.examples] == [357, 358]
++
++
++def test_duplicates_are_not_attributed_to_the_key_columns():
++    report = report_for(load_files([EXAMPLES / "sample_sales_dirty.csv"], Config()))
++    category = next(c for c in report.columns if c.column == "category")
++    assert (category.missing, category.invalid, category.issue_rows) == (0, 0, 0)
++    product = next(c for c in report.columns if c.column == "product")
++    assert (product.missing, product.invalid) == (1, 0)
++
++
++def test_top_reasons_reconcile_with_the_error_diagnostics():
++    config = Config()
++    result = validate(load_files([EXAMPLES / "sample_sales_dirty.csv"], config), config)
++    report = build_quality_report(result, config)
++    assert sum(r["rows"] for r in report.top_reasons) == len(result.errors)
++    assert set(r["reason"] for r in report.top_reasons) == set(result.errors.reason)
++    assert report.top_reasons == sorted(report.top_reasons, key=lambda r: (-r["rows"], r["reason"]))
++
++
++def test_example_limit_caps_and_orders_locations(sales_file, tmp_path):
++    rows = ["date,product,category,quantity,unit_price"]
++    rows += [f"2026-01-{day:02d},P{day},C,-1,1.00" for day in range(1, 9)]
++    path = tmp_path / "many.csv"
++    path.write_text("\n".join(rows) + "\n")
++    report = report_for(load_files([path], Config()))
++    quantity = next(c for c in report.checks if c.code == INVALID_QUANTITY)
++    assert quantity.rows == 8
++    assert len(quantity.examples) == 5
++    assert [e["source_row"] for e in quantity.examples] == [2, 3, 4, 5, 6]
++    limited = build_quality_report(
++        validate(load_files([path], Config()), Config()), Config(), example_limit=2
++    )
++    assert len(limited.checks[0].examples) == 2
++
++
++# --- Per-file aggregation and policies -------------------------------------------
++
++
++def test_statistics_per_source_file(sales_file, tmp_path):
++    second = tmp_path / "second.csv"
++    second.write_text(
++        "Date,Product,Category,Quantity,Unit Price,Order ID\n"
++        "2026-03-01,Lamp,Office,2,19.00,B001\n"
++        "2026-03-02,,Office,1,5.00,B002\n",
++        encoding="utf-8",
++    )
++    report = report_for(load_files([sales_file, second], Config()))
++    assert report.summary.files == 2
++    assert [f.file_name for f in report.files] == ["sales.csv", "second.csv"]
++    first, other = report.files
++    assert (first.input_rows, first.accepted_rows, first.invalid_rows, first.issues) == (3, 3, 0, 0)
++    assert (other.input_rows, other.accepted_rows, other.invalid_rows, other.issues) == (2, 1, 1, 1)
++    assert not any(f.rejected for f in report.files)
++    assert [f.excluded_rows for f in report.files] == [0, 1]
++
++
++def test_reject_file_marks_the_file_and_excludes_its_valid_rows(sales_file, tmp_path):
++    raw = load_files([sales_file], Config())
++    raw.loc[0, "quantity"] = "-1"
++    raw.loc[2, "source_file"] = str(tmp_path / "good.csv")
++    config = Config(validation_policy="reject_file")
++    report = build_quality_report(validate(raw, config), config)
++    bad, good = report.files
++    assert bad.rejected and not good.rejected
++    assert (bad.input_rows, bad.invalid_rows, bad.excluded_rows, bad.accepted_rows) == (2, 1, 2, 0)
++    assert (good.input_rows, good.excluded_rows, good.accepted_rows) == (1, 0, 1)
++    assert report.summary.rejected_files == 1
++    assert report.summary.excluded_rows == 2
++    assert report.policy == "reject_file"
++
++
++def test_skip_policy_produces_the_same_statistics_as_quarantine(sales_file):
++    raw = load_files([sales_file], Config())
++    raw.loc[0, "quantity"] = "-1"
++    quarantine = report_for(raw, Config())
++    skipped = report_for(raw, Config(validation_policy="skip"))
++    assert skipped.summary.to_dict() == quarantine.summary.to_dict()
++    assert counts_by_check(skipped) == counts_by_check(quarantine)
++    assert skipped.policy == "skip"
++
++
++# --- Rendered mapping -------------------------------------------------------------
++
++
++def test_to_dict_is_json_ready_and_deterministic(sales_file):
++    raw = load_files([sales_file], Config())
++    raw.loc[0, ["quantity", "product"]] = ["-1", ""]
++    config = Config(date_format="%Y-%m-%d", csv_chunk_size=2)
++    generated = datetime(2026, 11, 8, 10, 0, tzinfo=UTC)
++    payload = build_quality_report(validate(raw, config), config, generated).to_dict()
++    assert payload == build_quality_report(validate(raw, config), config, generated).to_dict()
++    assert json.loads(json.dumps(payload)) == payload
++    assert payload["schema_version"] == SCHEMA_VERSION
++    assert payload["generated_at"] == "2026-11-08T10:00:00+00:00"
++    assert payload["settings"] == {
++        "date_format": "%Y-%m-%d",
++        "csv_chunk_size": 2,
++        "checkpointing": False,
++    }
++    assert list(payload) == [
++        "schema_version",
++        "toolkit_version",
++        "generated_at",
++        "policy",
++        "settings",
++        "summary",
++        "dimensions",
++        "by_check",
++        "by_column",
++        "by_file",
++        "top_reasons",
++    ]
++    assert payload["summary"]["invalid_rows"] == 1
++    assert all(isinstance(v, int) for k, v in payload["summary"].items() if "percent" not in k)
++    assert payload["by_check"][0]["examples"][0]["source_row"] == 2
++    assert payload["generated_at"] is not None
++    assert build_quality_report(validate(raw, config), config).to_dict()["generated_at"] is None
++
++
++@pytest.mark.parametrize("chunk_size", [None, 1, 2, 1000])
++def test_statistics_are_identical_for_chunked_reads(chunk_size):
++    config = Config(csv_chunk_size=chunk_size)
++    report = build_quality_report(
++        validate(load_files([EXAMPLES / "sample_sales_dirty.csv"], config), config), config
++    )
++    payload = report.to_dict()
++    payload["settings"] = {}
++    whole = build_quality_report(
++        validate(load_files([EXAMPLES / "sample_sales_dirty.csv"], Config()), Config()), Config()
++    ).to_dict()
++    whole["settings"] = {}
++    assert payload == whole
++
++
++def test_blank_rows_are_outside_the_statistics(tmp_path):
++    path = tmp_path / "sales.csv"
++    path.write_text(
++        "date,product,category,quantity,unit_price\n2026-01-05,Laptop,Electronics,2,900\n\n\n"
++    )
++    report = report_for(load_files([path], Config()))
++    assert report.summary.input_rows == 1
++    assert report.summary.accepted_percent == 100.0
++    assert report.files[0].input_rows == 1

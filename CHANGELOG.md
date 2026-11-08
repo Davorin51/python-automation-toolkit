@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Add stable validation check identifiers (`missing_value`, `invalid_date`,
+  `invalid_quantity`, `invalid_price`, `duplicate_line`) and a new
+  `ValidationResult.checks` frame with one row per failed check
+  (`source_file`, `source_row`, `code`, `column`), so statistics no longer depend on
+  parsing the human-readable reason text. Existing validation behavior, the `errors`
+  frame and `validation_errors.json` are unchanged.
+- Add `ValidationResult.file_rows` recording the validated input rows per source file.
+- Add `processing/quality.py` with a `QualityReport` model and `build_quality_report`,
+  aggregating validation statistics by check, by business column, by quality dimension
+  (completeness, validity, uniqueness) and by source file, plus run-level counts,
+  percentages and the most common reasons. `QualityReport.to_dict` renders a
+  deterministic, JSON-ready mapping. CLI integration and file export follow separately.
+
 - Add incremental CSV processing: the `csv_chunk_size` setting and `--chunk-size`
   CLI flag read CSV inputs in fixed-size chunks through the new
   `iter_csv_chunks` generator, producing the same frame, `source_row` numbers and
