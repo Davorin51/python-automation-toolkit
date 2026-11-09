@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Add `workflow.py`, a minimal sequential workflow engine: a `Workflow` is an
+  ordered list of uniquely named `Step` callables sharing one `WorkflowContext`
+  (free-form `data` plus the `outputs` of completed steps). A failing required step
+  skips the remaining steps and raises the new `WorkflowError` (a `ToolkitError`,
+  so the CLI's error handling applies) with the partial `WorkflowResult` attached;
+  steps may instead be declared `continue_on_error` or given `retries`.
+  `KeyboardInterrupt` is never swallowed. The existing `run_pipeline` is unchanged.
+- Make workflow steps more resilient: `retry_delay`, `backoff` (exponential by
+  default, `backoff=1` for a constant wait) and `max_delay` configure the wait between
+  retries; `timeout` bounds a single attempt and abandons it with the new
+  `StepTimeoutError` (a `WorkflowError` and a `TimeoutError`), which is retried like
+  any other failure. `StepResult` now records the error of every attempt, the
+  formatted traceback of the last one, the delays waited and start/finish times;
+  `WorkflowResult.report()` renders a per-step, per-attempt text report, and a failed
+  run's `WorkflowError` names the step position, elapsed time, earlier attempt errors
+  and skipped steps and exposes the failing step as `error.step`. Defaults keep the
+  previous immediate-retry, no-timeout behavior; `Workflow(..., sleep=...)` lets tests
+  replace `time.sleep`.
 - Add stable validation check identifiers (`missing_value`, `invalid_date`,
   `invalid_quantity`, `invalid_price`, `duplicate_line`) and a new
   `ValidationResult.checks` frame with one row per failed check

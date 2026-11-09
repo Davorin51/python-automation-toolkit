@@ -43,6 +43,7 @@ performs that batch workflow and keeps rejected-row diagnostics for review.
 | PDF and charts | Cover with KPIs, four charts, data-quality counts and generation date |
 | Interfaces | CLI and optional CustomTkinter desktop app share one pipeline |
 | Run integrity | Staged publication, unique output folders and a manifest with source checksums |
+| Workflow engine | Sequential named steps with a shared context, exponential-backoff retries, per-step timeouts, fail-fast or continue-on-error handling and per-attempt failure reports |
 | Developer workflow | Type hints, logging, pytest, Ruff, coverage gate and GitHub Actions |
 
 ## Quick start
@@ -182,7 +183,7 @@ still applies. Test the benchmark on the deployment machine before sizing a work
 
 ```text
 src/automation_toolkit/
-  cli.py, config.py, pipeline.py
+  cli.py, config.py, pipeline.py, workflow.py
   ingestion/       CSV/XLSX readers and schema normalization
   processing/      Cleaning, validation and business analytics
   reporting/       Excel, PDF and charts

@@ -87,6 +87,54 @@ month or a zero prior denominator. Partial boundary months are included and
 should be interpreted accordingly. "Top products" in PNG charts ranks units sold;
 the products worksheet also exposes revenue.
 
+## Workflow engine
+
+`workflow.py` is a small, generic engine for running named steps strictly one after
+another. A `Workflow` holds an ordered list of `Step` objects; names must be unique and
+non-empty, and every step is a callable receiving the shared `WorkflowContext`. The
+context carries free-form `data` (seeded from the mapping passed to `run`) and the
+`outputs` of every succeeded step keyed by step name, so later steps consume earlier
+results without global state. Each `run` gets a fresh context and the caller's mapping
+is copied, so a workflow can be executed repeatedly.
+
+Error handling is explicit and has three outcomes per step: `succeeded`, `failed` or
+`skipped`. A step that raises is retried `retries` more times. The wait before retry
+`k` is `retry_delay * backoff ** (k - 1)` seconds, capped by `max_delay`; the defaults
+(`retry_delay=0`, `backoff=2`) retry immediately, so backoff is opt-in and `backoff=1`
+gives a constant wait. The engine never sleeps after the final failed attempt. Delays
+go through the `sleep` callable given to `Workflow`, which defaults to `time.sleep` and
+is replaced by a recording fake in the tests, so the schedule is tested exactly without
+real waiting.
+
+A step with a `timeout` runs each attempt in a daemon helper thread and waits at most
+that many seconds. If the attempt is still running, the engine raises
+`StepTimeoutError` (both a `WorkflowError` and a `TimeoutError`) for that attempt and
+treats it like any other failure: it is retried according to the schedule, or recorded
+as the step's failure. Python cannot kill a thread, so the abandoned attempt keeps
+running until it returns; its return value or exception is discarded and never reaches
+`outputs`. Timeouts are therefore meant for actions that are safe to abandon or that
+honor their own deadline, and the thread-based design works from the GUI's worker
+thread as well, which a `signal`-based alarm would not. Steps without a timeout run
+inline in the caller's thread exactly as before.
+
+When the attempts are exhausted and the step is required, the remaining steps are
+marked skipped and `WorkflowError` is raised with the original exception chained, the
+failing step name as `error.step` and the partial `WorkflowResult` as `error.result`.
+The message names the step, its position, the number of attempts, the elapsed time, the
+errors of earlier attempts and the skipped steps. Every `StepResult` keeps the error of
+each attempt (`errors`), the last error (`error`, cleared when a later attempt succeeds),
+its formatted `traceback`, the `delays` waited, `attempts`, `duration_seconds` (all
+attempts including waits) and UTC `started_at`/`finished_at`. `WorkflowResult.report()`
+renders the summary, one line per step and one line per failed attempt, optionally with
+tracebacks; the engine logs the same report at `DEBUG` level when a run fails. A step
+declared with `continue_on_error=True` records its failure and lets the run proceed;
+the returned result then reports `succeeded == False` and lists the failed step names.
+Only `Exception` subclasses are handled: `KeyboardInterrupt` and `SystemExit` propagate
+immediately, also from a timed step's helper thread and from an interrupted retry wait.
+`WorkflowError` is a `ToolkitError`, so the CLI's existing error mapping applies. The
+engine deliberately offers no parallelism, branching or persistence; the shared
+`pipeline` does not depend on it and keeps its staged publication behavior unchanged.
+
 ## Output integrity and safety
 
 Each run creates a private staging directory in the output parent, renders all

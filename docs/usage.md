@@ -221,6 +221,62 @@ Percentages are rounded to two decimals and use the validated input rows (blank
 rows already removed) as denominator. Identical inputs produce byte-identical
 files apart from `generated_at`.
 
+## Composing steps with the workflow engine
+
+`automation_toolkit.workflow` runs named steps in order and stops at the first
+failure of a required step. Each step receives a `WorkflowContext`: `ctx["key"]`
+reads and writes free-form data, and `ctx.outputs["step"]` holds the return value
+of an earlier step.
+
+```python
+from automation_toolkit.config import Config
+from automation_toolkit.exceptions import WorkflowError
+from automation_toolkit.ingestion import load_files
+from automation_toolkit.processing.analytics import analyze
+from automation_toolkit.processing.validation import validate
+from automation_toolkit.workflow import Workflow
+
+config = Config()
+workflow = (
+    Workflow("sales")
+    .add_step("load", lambda ctx: load_files(ctx["inputs"], config))
+    .add_step("validate", lambda ctx: validate(ctx.outputs["load"], config))
+    .add_step("analyze", lambda ctx: analyze(ctx.outputs["validate"].transactions))
+    .add_step(
+        "notify",
+        send_summary,
+        continue_on_error=True,
+        retries=3,
+        retry_delay=1.0,  # waits 1s, 2s, 4s between the attempts
+        backoff=2.0,
+        max_delay=30.0,
+        timeout=10.0,  # each attempt is abandoned after 10s
+    )
+)
+try:
+    result = workflow.run({"inputs": inputs})
+except WorkflowError as exc:
+    print(exc)  # which step failed, after how many attempts, and why
+    print(exc.result.summary())  # counts of succeeded, failed and skipped steps
+    print(exc.result.report(include_traceback=True))  # every attempt of every step
+else:
+    print(result.summary())
+    if not result.succeeded:  # only optional steps can fail without raising
+        print("Failed optional steps:", result.failed)
+    metrics = result.outputs["analyze"]
+```
+
+Failed attempts are logged as warnings while retrying and as an error (or a warning
+for `continue_on_error` steps) when the attempts are exhausted. The wait before retry
+`k` is `retry_delay * backoff ** (k - 1)` seconds, never more than `max_delay`; the
+defaults retry immediately and `backoff=1` keeps the wait constant. A `timeout` bounds
+each attempt: a slow attempt fails with `StepTimeoutError` and is retried like any other
+error, but the abandoned callable keeps running in the background until it returns, so
+only use timeouts for work that is safe to abandon. Each `StepResult` exposes `errors`
+(one per failed attempt), `traceback`, `delays`, `attempts`, `duration_seconds`,
+`started_at` and `finished_at`; `result.step("notify").timed_out` tells whether the
+last attempt hit the timeout. `KeyboardInterrupt` always propagates.
+
 ## Outputs and exit status
 
 The console prints the completed run directory. `all` writes:
