@@ -254,7 +254,8 @@ workflow = (
     )
 )
 try:
-    result = workflow.run({"inputs": inputs})
+    # With a checkpoint path, an interrupted run resumes after its last completed step.
+    result = workflow.run({"inputs": inputs}, checkpoint=".checkpoints/sales-workflow.json")
 except WorkflowError as exc:
     print(exc)  # which step failed, after how many attempts, and why
     print(exc.result.summary())  # counts of succeeded, failed and skipped steps
@@ -276,6 +277,182 @@ only use timeouts for work that is safe to abandon. Each `StepResult` exposes `e
 (one per failed attempt), `traceback`, `delays`, `attempts`, `duration_seconds`,
 `started_at` and `finished_at`; `result.step("notify").timed_out` tells whether the
 last attempt hit the timeout. `KeyboardInterrupt` always propagates.
+
+Passing `checkpoint=` saves the outputs and shared data of every completed step to a
+checksummed JSON file (written atomically) and removes it when the run finishes. Running
+the same workflow again with the same path restores the completed steps instead of
+repeating them; `result.restored` lists them. The step outputs and the values stored in
+the context must be JSON serializable (lists, dicts, strings, numbers), otherwise the run
+stops with a clear error. Do not pass frames or other objects through the context when
+checkpointing; store file paths or run folders instead. A damaged, tampered or outdated
+checkpoint, or one written for different steps, is ignored with a warning and the
+workflow starts from the beginning.
+A process that is killed mid-step resumes from the last completed step on the next
+run. Do not run two resumes of the same checkpoint file at once.
+
+## Running and resuming workflows from the terminal
+
+`automation-toolkit-workflow` (or `python -m automation_toolkit.workflow_cli`) runs a
+`Workflow` object defined in Python. Point `--workflow` at `module:attribute` or at
+`path/to/file.py:attribute`; the attribute may be a `Workflow` or a zero-argument
+function returning one.
+
+```bash
+# nightly.py defines: nightly = Workflow("nightly").add_step(...)...
+automation-toolkit-workflow --workflow nightly.py:nightly --describe
+automation-toolkit-workflow --workflow nightly.py:nightly \
+    --data inputs='["exports/jan.csv"]' --data limit=100 \
+    --checkpoint .checkpoints/nightly.json --json-report reports/nightly.json
+# ... interrupted or a step failed: fix the cause and run the same command again.
+# Completed steps are restored from the checkpoint; --restart discards it instead.
+```
+
+`--data KEY=VALUE` sets initial context values (repeatable; the value is parsed as
+JSON when possible, otherwise kept as text) and `--data-json FILE` loads a JSON object;
+command-line pairs override the file. `--json-report FILE` writes the JSON result report
+next to the text report, and `--json-report -` prints only the JSON to stdout so it can be
+piped. `--traceback` adds tracebacks to the text report.
+
+| Exit status | Meaning |
+| --- | --- |
+| 0 | Every step succeeded |
+| 2 | The run completed, but `continue_on_error` steps failed |
+| 1 | A required step failed after its retries, or the workflow could not be loaded; the text/JSON report is still produced and the checkpoint is kept |
+| 130 | Interrupted with Ctrl-C; the checkpoint is kept for a later resume |
+
+The JSON report (`report_version` 1) contains `workflow`, `succeeded`, `resumed`,
+`summary`, `duration_seconds`, `counts` by status, the `failed`, `skipped` and
+`restored` step names and one entry per step with `status`, `attempts`, `retries`,
+`errors` (type, message and the delay waited before the next attempt), the last `error`,
+`traceback`, `started_at`, `finished_at`, `timed_out`, `restored`, `output` and
+`output_serializable`. From Python the same report is available as `result.to_dict()`,
+`result.to_json()` and `result.write_json(path)`.
+
+## Profiling any CSV dataset
+
+`automation-toolkit-profile` (or `python -m automation_toolkit.profile_cli`) describes
+what a CSV file contains before you feed it to the pipeline. It does not require the
+sales schema and never rejects rows; it only reports.
+
+```bash
+automation-toolkit-profile --input examples/sample_sales_dirty.csv
+automation-toolkit-profile --input jan.csv feb.csv --json reports/profile.json
+automation-toolkit-profile --input export.csv --delimiter ";" --encoding cp1250 --strict
+# A large export, 200,000 records per chunk, with NA/null and "#N/A" counted as missing
+automation-toolkit-profile --input big.csv --chunk-size 200000 --null-as-missing --null-token "#N/A"
+```
+
+The delimiter, encoding and `date_format` come from `--config` (same YAML as the
+pipeline) and can be overridden with `--delimiter` and `--encoding`.
+
+| Section | Contents |
+| --- | --- |
+| Dataset | Rows, columns, missing cells and percentage, duplicate rows (exact repeats of an earlier non-blank row), completely blank rows, short rows (fewer fields than the header) |
+| Per column | Inferred type (`integer`, `float`, `boolean`, `date`, `string`, `mixed` or `empty`), dominant type and its share, count and up to three examples of each value type, missing values split into empty, whitespace-only, absent (short row) and placeholders, missing values, placeholder values, unique values, up to five most frequent values, numeric min/max/mean/median/std, date range or text length range, whitespace-padded values |
+| Warnings | Duplicate or blank headers (with their new names), headers differing only in case or spacing, mixed-type columns, integers with leading zeros, whitespace-only cells, control characters such as NUL, no data rows, short/blank/duplicate rows, columns that are empty, mostly missing (at least 50%) or constant, placeholders, padded values and columns that are at least 90% one type but contain outliers (for example an invalid date) |
+
+Missing means an empty cell, a whitespace-only cell or a field absent because the
+record had fewer fields than the header; `missing_breakdown` counts each kind, and
+`rows_with_missing` / `complete_rows` count rows. Placeholder text such as `NA`, `N/A`,
+`null`, `None` or `-` is counted separately as `null_like` and excluded from type
+inference, because the toolkit otherwise keeps such values as text. `--null-as-missing`
+counts placeholders as missing too, and `--null-token TEXT` (repeatable) adds your own.
+
+A type is inferred only when every non-missing value matches it; dates match the
+configured `date_format` or ISO 8601, and integers mixed with decimals are `float`.
+When one type covers at least 90% of the values the column stays `string` and a
+"mostly <type>" warning names the outliers (for example one invalid date). When no
+type reaches 90%, the column is `mixed`; its statistics then describe the dominant type
+only and say so in `stats.of`.
+
+Blank lines and all-empty lines (`,,,`) are both reported as blank rows of empty cells,
+never as short rows. A row with fewer fields than the header is a short row, and its
+absent fields are counted under `absent` rather than `empty`. Records with embedded
+newlines or delimiters inside quotes are single rows, and the line number in a
+malformed-file error counts the physical lines, so it still points at the right place.
+
+Every header gets a unique `name`: duplicates keep the first occurrence and later ones
+become `<header>_2`, `<header>_3`, ... (skipping names already used), and blank headers
+become `column_<position>`. The original text stays in `header`, and each column is
+profiled separately.
+
+**Large files.** The file is streamed in chunks of `--chunk-size` records and never
+loaded whole. Without an explicit size (or `csv_chunk_size`) the profiler uses 50,000
+rows, capped so one chunk holds about 500,000 cells and about 32 million characters,
+so very wide files and files with long free-text fields use smaller chunks. An explicit
+chunk size is never split further. Every reported statistic is identical for any chunk size; the test suite checks
+that for chunk sizes from 1 to 100,000, and the benchmark re-checks it on 100,000 rows.
+
+Memory grows only with distinct values: 8 bytes per distinct row (duplicate detection)
+and 16 bytes per distinct value of each column (a 64-bit hash, an exact count and a
+first-appearance rank). Values are compared by hash, so a collision could in principle
+undercount by one. Unique counts and top values are exact at any size: only the text of
+the 64 best-ranked values per column is kept, and since counts only grow, a value that
+ends in the top five was always among them when it last appeared. `top_values_exact` is
+kept for compatibility and is always true.
+
+The median is exact up to 200,000 numbers per column; above that it is estimated from
+a bottom-k sketch that keeps the values whose *row positions* hash smallest
+(`stats.median_approximate`). Because a value's priority depends only on its position,
+the sketch is a uniform sample of the column and gives the same answer at any chunk
+size; on 600,000-value test columns its rank was within 0.13% of the true median. Median
+samples share a budget of 8 million numbers (about 64 MB) per file, so files with more
+than 40 columns keep smaller samples per column, never fewer than 20,000 (rank error
+about 0.35%).
+
+Minimum, maximum, mean and standard deviation are exact up to float precision:
+
+- Integers keep full precision beyond 64 bits for minimum, maximum and median, and the
+  mean of an integer column comes from an exact integer sum. The standard deviation is
+  computed from exact differences, so `10**20 + 1` and `10**20 + 2` give 0.707107. A
+  400-digit value is still an integer; only digits other than ASCII 0-9 make it text.
+- Floats use three exact power-of-two scalings, so values near the float limit
+  (`1e308`, `-1e308`) and tiny spreads (`1e-200`) neither overflow nor underflow. If a
+  result truly exceeds the float range it is `null` with a warning. A literal such as
+  `1e400` is not a valid float and is reported as text.
+- Values are rounded to 6 decimals as before, but never to fewer than 6 significant
+  digits (`1e-9` stays `1e-09`), and the mean and standard deviation are cut to 15
+  significant digits, which removes float noise that would otherwise make them differ
+  in the last digit between chunk sizes.
+- Dates are compared in UTC when offsets are present (`2026-01-01T23:30:00-05:00` is
+  `2026-01-02T04:30` UTC), date-only values count as midnight, and nanoseconds as well
+  as years outside 1677-2262 are kept.
+
+```bash
+# Time and memory on 100,000 synthetic messy rows, at several chunk sizes
+python scripts/benchmark_profiling.py --rows 100000 --json docs/benchmark_profiling.json
+```
+
+The [recorded result](benchmark_profiling.json) is one Linux x86_64 run: about 185,000
+rows per second on a 7-column file, with the traced peak scaling from 22 MB at
+`--chunk-size 10000` to 99 MB at 200,000. It is a single measurement on one machine,
+not a performance guarantee; rerun it on the target machine before sizing a workflow.
+
+| Exit status | Meaning |
+| --- | --- |
+| 0 | Every input was profiled |
+| 2 | With `--strict`: every input was profiled but at least one has warnings |
+| 1 | An input is missing, empty (no header), undecodable or malformed (a blank first line, or a row with more fields than the header), or the options are invalid; readable inputs are still profiled |
+
+A header-only file is a valid, empty dataset (`rows: 0`). `--json PATH` writes one
+profile object (`schema_version` 2: `source`, `summary`, `processing`, `warnings`,
+`columns`), or a list of them for several inputs. From Python:
+
+```python
+from automation_toolkit.processing.profiling import profile_csv, profile_frame
+
+profile = profile_csv("export.csv", chunk_size=100_000, null_as_missing=True)
+print(profile.to_text())
+data = profile.to_dict()
+
+# Or feed your own chunks (columns in header order, None = absent field)
+from automation_toolkit.processing.profiling import DatasetProfiler
+
+profiler = DatasetProfiler(["id", "amount"], source="stream")
+for chunk in chunks:
+    profiler.update(chunk)
+profile = profiler.result()
+```
 
 ## Outputs and exit status
 

@@ -19,9 +19,18 @@ Error handling is deliberately simple and explicit:
 * a step declared with ``continue_on_error=True`` records its failure and lets the
   workflow proceed; the final result then reports ``succeeded == False``.
 
+With ``Workflow.run(checkpoint=path)`` the outputs and shared data of every succeeded
+step are persisted to a checksummed JSON file after that step, written atomically. A
+later run with the same workflow definition restores the completed prefix and continues
+with the first unfinished step; a finished run removes the file. Unreadable, corrupted,
+altered or mismatching checkpoints are discarded with a warning and the workflow starts
+from the beginning rather than trusting partial state.
+
 Every :class:`StepResult` keeps the error of each attempt, the formatted traceback of
 the last one, the delays that were waited and timing information;
-:meth:`WorkflowResult.report` renders all of it as text for logs and bug reports.
+:meth:`WorkflowResult.report` renders all of it as text for logs and bug reports, and
+:meth:`WorkflowResult.to_dict` / :meth:`WorkflowResult.write_json` produce a versioned,
+JSON-ready record of the same facts for machines.
 
 ``KeyboardInterrupt`` and ``SystemExit`` are never swallowed, so an interrupted workflow
 behaves like any other interrupted toolkit command.
@@ -29,8 +38,11 @@ behaves like any other interrupted toolkit command.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
+import os
 import threading
 import time
 import traceback
@@ -38,6 +50,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import KW_ONLY, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from automation_toolkit.exceptions import StepTimeoutError, WorkflowError
@@ -78,6 +91,9 @@ class WorkflowContext:
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
+
+    def update_data(self, **values: Any) -> None:
+        self.data.update(values)
 
 
 def _check_number(step: str, option: str, value: Any, *, minimum: float, exclusive: bool) -> None:
@@ -164,6 +180,8 @@ class StepResult:
     delays: list[float] = field(default_factory=list)
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    #: ``True`` when the output came from a checkpoint instead of running the action.
+    restored: bool = False
 
     @property
     def succeeded(self) -> bool:
@@ -178,11 +196,42 @@ class StepResult:
     def error_message(self) -> str | None:
         return _describe_error(self.error) if self.error is not None else None
 
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready record: status, attempts and retries, every error, delays, timing."""
+        output, serializable = _json_safe(self.output)
+        return {
+            "name": self.name,
+            "status": self.status.value,
+            "restored": self.restored,
+            "attempts": self.attempts,
+            "retries": max(self.attempts - 1, 0),
+            "duration_seconds": self.duration_seconds,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "timed_out": self.timed_out,
+            "error": _error_dict(self.error) if self.error is not None else None,
+            "errors": [
+                {
+                    "attempt": attempt,
+                    **_error_dict(error),
+                    "delay_before_retry": (
+                        self.delays[attempt - 1] if attempt <= len(self.delays) else None
+                    ),
+                }
+                for attempt, error in enumerate(self.errors, start=1)
+            ],
+            "traceback": self.traceback,
+            "output": output,
+            "output_serializable": serializable,
+        }
+
     def describe(self) -> str:
         """One line: name, status, attempts, duration and the last error, if any."""
         plural = "s" if self.attempts != 1 else ""
         text = f"{self.name}: {self.status.value}"
-        if self.status is not StepStatus.SKIPPED and self.attempts:
+        if self.restored:
+            text += " (restored from checkpoint)"
+        elif self.status is not StepStatus.SKIPPED and self.attempts:
             text += f" after {self.attempts} attempt{plural} in {self.duration_seconds:.2f}s"
         if self.error is not None:
             text += f" ({self.error_message})"
@@ -219,6 +268,15 @@ class WorkflowResult:
         return [s.name for s in self.steps if s.status is StepStatus.SKIPPED]
 
     @property
+    def restored(self) -> list[str]:
+        return [s.name for s in self.steps if s.restored]
+
+    @property
+    def resumed(self) -> bool:
+        """``True`` when at least one step was restored from a checkpoint."""
+        return any(s.restored for s in self.steps)
+
+    @property
     def duration_seconds(self) -> float:
         return sum(s.duration_seconds for s in self.steps)
 
@@ -237,6 +295,42 @@ class WorkflowResult:
             f"{counts[StepStatus.SUCCEEDED]} succeeded, {counts[StepStatus.FAILED]} failed, "
             f"{counts[StepStatus.SKIPPED]} skipped"
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Versioned, JSON-ready mapping with per-step statuses, retries, errors and outputs.
+
+        Outputs that are not JSON serializable are replaced by their ``repr`` and flagged
+        with ``output_serializable: false`` so the report can always be written.
+        """
+        counts = {status.value: 0 for status in StepStatus}
+        for result in self.steps:
+            counts[result.status.value] += 1
+        return {
+            "report_version": REPORT_VERSION,
+            "workflow": self.name,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "succeeded": self.succeeded,
+            "resumed": self.resumed,
+            "summary": self.summary(),
+            "duration_seconds": self.duration_seconds,
+            "counts": counts,
+            "failed": self.failed,
+            "skipped": self.skipped,
+            "restored": self.restored,
+            "steps": [step.to_dict() for step in self.steps],
+        }
+
+    def to_json(self, *, indent: int | None = 2) -> str:
+        return json.dumps(self.to_dict(), indent=indent)
+
+    def write_json(self, path: Path | str) -> Path:
+        """Atomically write :meth:`to_json` to ``path`` (parents are created); return the path."""
+        target = Path(path)
+        try:
+            _atomic_write_text(target, self.to_json())
+        except OSError as exc:
+            raise WorkflowError(f"Cannot write workflow report {target}: {exc}") from exc
+        return target
 
     def report(self, *, include_traceback: bool = False) -> str:
         """Multi-line text: the summary, one line per step and the errors of every attempt."""
@@ -257,6 +351,174 @@ class WorkflowResult:
             if include_traceback and result.traceback:
                 lines.extend("       " + line for line in result.traceback.rstrip().splitlines())
         return "\n".join(lines)
+
+
+CHECKPOINT_VERSION = 1
+#: Format version of :meth:`WorkflowResult.to_dict`; bumped on incompatible changes.
+REPORT_VERSION = 1
+
+
+def _json_safe(value: Any) -> tuple[Any, bool]:
+    """Return ``(value, True)`` when strictly JSON serializable, else ``(repr(value), False)``.
+
+    ``NaN`` and infinities are rejected as well, so reports stay valid for non-Python readers.
+    """
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError):
+        return repr(value), False
+    return value, True
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to a sibling temporary file, fsync it and rename it over ``path``.
+
+    The parent directory is fsynced afterwards where the platform allows it, so the
+    rename itself survives a crash. Callers translate ``OSError`` into a toolkit error.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    try:
+        directory = os.open(path.parent, os.O_RDONLY)
+    except OSError:  # pragma: no cover - directories cannot be opened on some platforms
+        return
+    try:
+        os.fsync(directory)
+    except OSError:  # pragma: no cover - not supported by every file system
+        pass
+    finally:
+        os.close(directory)
+
+
+def _error_dict(error: BaseException) -> dict[str, str]:
+    return {"type": type(error).__name__, "message": str(error)}
+
+
+@dataclass
+class RestoredState:
+    """The completed prefix of a workflow read back from a checkpoint."""
+
+    completed: list[dict[str, Any]]
+    data: dict[str, Any]
+
+
+class WorkflowCheckpoint:
+    """Checksummed JSON record of the steps a workflow run has completed.
+
+    The file names the workflow, the ordered step names it was written for and the
+    checkpoint format version, and carries a SHA-256 checksum of its payload. Writes go
+    to a temporary file in the same directory that is fsynced and atomically renamed over
+    the target, so an interrupted write never leaves a half-written checkpoint. Outputs
+    and shared data must be JSON serializable; anything else fails the run explicitly
+    rather than silently storing an incomplete state.
+    """
+
+    def __init__(self, path: Path | str) -> None:
+        self.path = Path(path)
+
+    def _fingerprint(self, workflow: Workflow) -> dict[str, Any]:
+        return {"workflow": workflow.name, "steps": [s.name for s in workflow.steps]}
+
+    @staticmethod
+    def _checksum(payload: dict[str, Any]) -> str:
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def load(self, workflow: Workflow) -> RestoredState | None:
+        """Return the completed prefix, or ``None`` when there is no usable checkpoint."""
+        if not self.path.exists():
+            return None
+        try:
+            return self._read(workflow)
+        except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
+            logger.warning(
+                "Ignoring unusable workflow checkpoint %s for '%s': %s",
+                self.path,
+                workflow.name,
+                exc,
+            )
+            self.clear()
+            return None
+
+    def _read(self, workflow: Workflow) -> RestoredState:
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict) or set(document) != {"payload", "checksum"}:
+            raise ValueError("not a workflow checkpoint document")
+        payload, checksum = document["payload"], document["checksum"]
+        if not isinstance(payload, dict) or checksum != self._checksum(payload):
+            raise ValueError("checksum does not match the payload")
+        if payload.get("version") != CHECKPOINT_VERSION:
+            raise ValueError(f"unsupported checkpoint version {payload.get('version')!r}")
+        expected = self._fingerprint(workflow)
+        if payload.get("workflow") != expected["workflow"]:
+            raise ValueError(f"written for workflow {payload.get('workflow')!r}")
+        if payload.get("steps") != expected["steps"]:
+            raise ValueError("the workflow steps have changed since it was written")
+        completed, data = payload["completed"], payload["data"]
+        if not isinstance(completed, list) or not isinstance(data, dict):
+            raise ValueError("malformed completed steps or data")
+        names = [entry.get("name") if isinstance(entry, dict) else None for entry in completed]
+        if names != expected["steps"][: len(names)]:
+            raise ValueError("completed steps are not a prefix of the workflow")
+        for entry in completed:
+            if "output" not in entry:
+                raise ValueError(f"completed step {entry['name']!r} has no output")
+            attempts = entry.get("attempts", 1)
+            if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+                raise ValueError(f"completed step {entry['name']!r} has an invalid attempt count")
+        return RestoredState(completed, data)
+
+    def save(self, workflow: Workflow, results: list[StepResult], context: WorkflowContext) -> None:
+        """Persist every succeeded step (a prefix of the run) and the shared data."""
+        completed = []
+        for result in results:
+            if result.status is not StepStatus.SUCCEEDED:
+                break
+            completed.append(
+                {
+                    "name": result.name,
+                    "output": result.output,
+                    "attempts": result.attempts,
+                    "duration_seconds": result.duration_seconds,
+                    "finished_at": result.finished_at.isoformat() if result.finished_at else None,
+                }
+            )
+        payload = {
+            "version": CHECKPOINT_VERSION,
+            **self._fingerprint(workflow),
+            "saved_at": datetime.now(UTC).isoformat(),
+            "completed": completed,
+            "data": context.data,
+        }
+        try:
+            text = json.dumps({"payload": payload, "checksum": self._checksum(payload)}, indent=2)
+        except (TypeError, ValueError) as exc:
+            raise WorkflowError(
+                f"Cannot checkpoint workflow '{workflow.name}' after step "
+                f"'{completed[-1]['name'] if completed else '<none>'}': outputs and shared data "
+                f"must be JSON serializable ({exc})."
+            ) from exc
+        try:
+            _atomic_write_text(self.path, text)
+        except OSError as exc:
+            raise WorkflowError(
+                f"Cannot write workflow checkpoint {self.path} for '{workflow.name}': {exc}"
+            ) from exc
+
+    def clear(self) -> None:
+        """Remove the checkpoint and any leftover temporary file; missing files are fine."""
+        for path in (self.path, self.path.with_name(self.path.name + ".tmp")):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning("Cannot remove workflow checkpoint %s: %s", path, exc)
 
 
 class Workflow:
@@ -326,16 +588,61 @@ class Workflow:
             )
         )
 
-    def run(self, initial_data: Mapping[str, Any] | None = None) -> WorkflowResult:
+    def run(
+        self,
+        initial_data: Mapping[str, Any] | None = None,
+        *,
+        checkpoint: WorkflowCheckpoint | Path | str | None = None,
+    ) -> WorkflowResult:
+        """Run every step in order; with ``checkpoint`` resume after the completed prefix.
+
+        Only succeeded steps are restored. A failed ``continue_on_error`` step and every
+        step after it run again, because the checkpoint only ever records a completed
+        prefix. Checkpointed ``data`` fills the context first and the ``initial_data`` of
+        this run overrides it key by key, so an operator can correct an input and resume.
+        """
         if not self._steps:
             raise WorkflowError(f"Workflow '{self.name}' has no steps.")
+        if initial_data is not None and not isinstance(initial_data, Mapping):
+            raise WorkflowError(
+                f"Workflow '{self.name}' initial_data must be a mapping, "
+                f"got {type(initial_data).__name__}."
+            )
+        if checkpoint is not None and not isinstance(checkpoint, WorkflowCheckpoint):
+            if not isinstance(checkpoint, str | os.PathLike):
+                raise WorkflowError(
+                    f"Workflow '{self.name}' checkpoint must be a path or WorkflowCheckpoint, "
+                    f"got {type(checkpoint).__name__}."
+                )
+            checkpoint = WorkflowCheckpoint(checkpoint)
         context = WorkflowContext(self.name, data=dict(initial_data or {}))
         results = [StepResult(step.name) for step in self._steps]
         outcome = WorkflowResult(self.name, results, context)
         total = len(self._steps)
-        logger.info("Starting workflow '%s' with %d steps", self.name, total)
+        restored = checkpoint.load(self) if checkpoint is not None else None
+        if restored is not None:
+            self._restore(restored, results, context)
+            logger.info(
+                "Resuming workflow '%s' from checkpoint: %d of %d steps already completed",
+                self.name,
+                len(restored.completed),
+                total,
+            )
+        else:
+            logger.info("Starting workflow '%s' with %d steps", self.name, total)
         for index, (step, result) in enumerate(zip(self._steps, results, strict=True), start=1):
+            if result.restored:
+                continue
             self._execute(step, result, context)
+            if checkpoint is not None and result.status is StepStatus.SUCCEEDED:
+                try:
+                    checkpoint.save(self, results, context)
+                except WorkflowError as exc:
+                    for remaining in results[index:]:
+                        remaining.status = StepStatus.SKIPPED
+                    exc.result = outcome
+                    exc.step = step.name
+                    raise
             if result.status is StepStatus.FAILED and not step.continue_on_error:
                 for remaining in results[index:]:
                     remaining.status = StepStatus.SKIPPED
@@ -359,8 +666,24 @@ class Workflow:
                 failure.result = outcome
                 failure.step = step.name
                 raise failure from error
+        if checkpoint is not None:
+            checkpoint.clear()
         logger.info("%s", outcome.summary())
         return outcome
+
+    @staticmethod
+    def _restore(state: RestoredState, results: list[StepResult], context: WorkflowContext) -> None:
+        current = dict(context.data)
+        context.data.clear()
+        context.data.update(state.data)
+        context.data.update(current)
+        for entry, result in zip(state.completed, results, strict=False):
+            result.status = StepStatus.SUCCEEDED
+            result.restored = True
+            result.output = entry["output"]
+            result.attempts = int(entry.get("attempts", 1))
+            result.duration_seconds = 0.0
+            context.outputs[result.name] = entry["output"]
 
     def _execute(self, step: Step, result: StepResult, context: WorkflowContext) -> None:
         started = time.perf_counter()
@@ -414,14 +737,22 @@ class Workflow:
 
     @staticmethod
     def _call(step: Step, context: WorkflowContext) -> Any:
-        """Run one attempt, in a helper thread when the step has a timeout."""
+        """Run one attempt, in a helper thread when the step has a timeout.
+
+        A timed attempt never touches the live context: it works on a private copy whose
+        ``data`` and ``outputs`` are merged back only when the attempt finishes in time.
+        An abandoned attempt keeps writing into its detached copy, so it cannot alter what
+        later steps, the result or a checkpoint observe. Mutations *inside* shared values
+        (appending to a list stored in ``data``) are not isolated by the shallow copy.
+        """
         if step.timeout is None:
             return step.action(context)
+        private = WorkflowContext(context.workflow, dict(context.data), dict(context.outputs))
         outcome: list[tuple[bool, Any]] = []
 
         def target() -> None:
             try:
-                outcome.append((True, step.action(context)))
+                outcome.append((True, step.action(private)))
             except BaseException as exc:  # noqa: BLE001 - re-raised in the calling thread
                 outcome.append((False, exc))
 
@@ -432,7 +763,11 @@ class Workflow:
             raise StepTimeoutError(
                 f"Step '{step.name}' timed out after {step.timeout:g}s; the attempt was abandoned."
             )
+        if not outcome:  # pragma: no cover - the helper always records an outcome
+            raise RuntimeError(f"Step '{step.name}' attempt ended without recording a result.")
         ok, value = outcome[0]
-        if ok:
-            return value
-        raise value
+        if not ok:
+            raise value
+        context.data.clear()
+        context.data.update(private.data)
+        return value

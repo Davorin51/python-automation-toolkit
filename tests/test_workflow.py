@@ -1,8 +1,11 @@
 """Sequential workflow engine: ordering, shared context, failure handling and retries."""
 
+import json
 import logging
+import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -12,7 +15,13 @@ from automation_toolkit.ingestion import load_files
 from automation_toolkit.pipeline import run_pipeline
 from automation_toolkit.processing.analytics import analyze
 from automation_toolkit.processing.validation import validate
-from automation_toolkit.workflow import Step, StepStatus, Workflow, WorkflowContext
+from automation_toolkit.workflow import (
+    Step,
+    StepStatus,
+    Workflow,
+    WorkflowCheckpoint,
+    WorkflowContext,
+)
 
 
 def test_steps_run_in_order_and_share_context():
@@ -574,3 +583,724 @@ def test_definition_errors_carry_no_step_or_result():
     assert issubclass(StepTimeoutError, WorkflowError) and issubclass(
         StepTimeoutError, ToolkitError
     )
+
+
+# --- Checkpointing and recovery ----------------------------------------------------------
+
+
+def counting_workflow(calls: list[str], fail_at: str | None = None, **kwargs) -> Workflow:
+    """Three steps that record their calls; ``fail_at`` names a step that raises once armed."""
+
+    def make(name):
+        def action(ctx):
+            calls.append(name)
+            if name == fail_at and ctx.get("arm", True):
+                raise RuntimeError(f"{name} broke")
+            ctx[f"{name}_ran"] = True
+            return {"step": name, "upstream": sorted(ctx.outputs)}
+
+        return action
+
+    workflow = Workflow("ckpt", **kwargs)
+    for name in ("load", "transform", "publish"):
+        workflow.add_step(name, make(name))
+    return workflow
+
+
+def read_checkpoint(path: Path) -> dict:
+    return json.loads(path.read_text())
+
+
+def test_failed_run_leaves_checkpoint_and_resume_skips_completed_steps(tmp_path, caplog):
+    path = tmp_path / "state" / "ckpt.json"
+    calls: list[str] = []
+    workflow = counting_workflow(calls, fail_at="transform")
+
+    with pytest.raises(WorkflowError, match="transform broke"):
+        workflow.run({"arm": True}, checkpoint=path)
+    assert calls == ["load", "transform"]
+    assert path.exists() and not path.with_name("ckpt.json.tmp").exists()
+    document = read_checkpoint(path)
+    assert set(document) == {"payload", "checksum"}
+    payload = document["payload"]
+    assert payload["workflow"] == "ckpt" and payload["steps"] == ["load", "transform", "publish"]
+    assert [c["name"] for c in payload["completed"]] == ["load"]
+    assert payload["completed"][0]["output"] == {"step": "load", "upstream": []}
+    assert payload["data"] == {"arm": True, "load_ran": True}
+
+    calls.clear()
+    with caplog.at_level(logging.INFO):
+        result = workflow.run({"arm": False}, checkpoint=path)
+
+    assert calls == ["transform", "publish"]  # load was not repeated
+    assert result.succeeded and result.resumed and result.restored == ["load"]
+    assert result.step("load").restored and result.step("load").attempts == 1
+    assert result.step("load").output == {"step": "load", "upstream": []}
+    assert result.outputs["transform"] == {"step": "transform", "upstream": ["load"]}
+    assert result.outputs["publish"]["upstream"] == ["load", "transform"]
+    assert result.context["load_ran"] is True and result.context["arm"] is False
+    assert "Resuming workflow 'ckpt' from checkpoint: 1 of 3 steps already completed" in (
+        caplog.text
+    )
+    assert result.step("load").describe() == "load: succeeded (restored from checkpoint)"
+    assert "1. load: succeeded (restored from checkpoint)" in result.report()
+    assert not path.exists()  # a completed run removes its checkpoint
+
+
+def test_initial_data_of_the_resuming_run_overrides_checkpointed_data(tmp_path):
+    path = tmp_path / "ckpt.json"
+    workflow = Workflow("precedence")
+    workflow.add_step("set", lambda ctx: ctx.update_data(value="from step", produced="kept"))
+    workflow.add_step("fail", failing_times(1, error=OSError))
+    with pytest.raises(WorkflowError):
+        workflow.run({"value": "initial", "other": 1}, checkpoint=path)
+    result = workflow.run({"value": "changed", "extra": 3}, checkpoint=path)
+    # Step-produced and untouched keys survive; keys passed again are overridden.
+    assert result.context.data == {"value": "changed", "produced": "kept", "other": 1, "extra": 3}
+    plain = workflow.run({"value": "fresh"})
+    assert plain.context.data == {"value": "from step", "produced": "kept"}
+
+
+def test_interrupted_twice_then_completes_without_repeating_work(tmp_path):
+    path = tmp_path / "ckpt.json"
+    calls: list[str] = []
+    attempts = {"n": 0}
+
+    def flaky_publish(ctx):
+        calls.append("publish")
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise KeyboardInterrupt
+        return "done"
+
+    workflow = Workflow("twice")
+    workflow.add_step("load", lambda ctx: calls.append("load") or "data")
+    workflow.add_step("transform", lambda ctx: calls.append("transform") or "shaped")
+    workflow.add_step("publish", flaky_publish)
+    for _ in range(2):
+        with pytest.raises(KeyboardInterrupt):
+            workflow.run(checkpoint=path)
+    result = workflow.run(checkpoint=path)
+    assert calls == ["load", "transform", "publish", "publish", "publish"]
+    assert result.restored == ["load", "transform"] and result.outputs["publish"] == "done"
+
+
+def test_fully_completed_checkpoint_restores_every_step(tmp_path):
+    path = tmp_path / "ckpt.json"
+    workflow = Workflow("all").add_step("a", lambda ctx: 1).add_step("b", lambda ctx: 2)
+    # Simulate a crash after the last step was checkpointed but before cleanup.
+    checkpoint = WorkflowCheckpoint(path)
+    first = workflow.run()
+    checkpoint.save(workflow, first.steps, first.context)
+    calls: list[str] = []
+    rerun = Workflow("all")
+    rerun.add_step("a", lambda ctx: calls.append("a"))
+    rerun.add_step("b", lambda ctx: calls.append("b"))
+    result = rerun.run(checkpoint=checkpoint)
+    assert (
+        calls == [] and result.restored == ["a", "b"] and dict(result.outputs) == {"a": 1, "b": 2}
+    )
+    assert not path.exists()
+
+
+def test_failed_optional_step_is_rerun_and_not_checkpointed(tmp_path):
+    path = tmp_path / "ckpt.json"
+    calls: list[str] = []
+
+    def optional(ctx):
+        calls.append("optional")
+        raise ValueError("flaky")
+
+    def required(ctx):
+        calls.append("required")
+        if ctx.get("arm"):
+            raise OSError("down")
+        return "ok"
+
+    workflow = Workflow("optional")
+    workflow.add_step("first", lambda ctx: calls.append("first") or "x")
+    workflow.add_step("optional", optional, continue_on_error=True)
+    workflow.add_step("required", required)
+    with pytest.raises(WorkflowError, match="down"):
+        workflow.run({"arm": True}, checkpoint=path)
+    assert [c["name"] for c in read_checkpoint(path)["payload"]["completed"]] == ["first"]
+    calls.clear()
+    result = workflow.run({"arm": False}, checkpoint=path)
+    assert calls == ["optional", "required"]
+    assert result.restored == ["first"] and result.failed == ["optional"]
+    assert not result.succeeded and not path.exists()
+
+
+def test_run_without_checkpoint_writes_nothing(tmp_path):
+    workflow = Workflow("plain").add_step("a", lambda ctx: 1)
+    workflow.run()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_checkpoint_accepts_path_string_and_object(tmp_path):
+    targets = (str(tmp_path / "s.json"), tmp_path / "p.json", WorkflowCheckpoint(tmp_path / "o"))
+    for target in targets:
+        workflow = Workflow("kinds").add_step("a", lambda ctx: 1).add_step("b", failing_times(1))
+        with pytest.raises(WorkflowError):
+            workflow.run(checkpoint=target)
+        assert workflow.run(checkpoint=target).restored == ["a"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
+def test_checkpoint_write_is_atomic(tmp_path, monkeypatch):
+    path = tmp_path / "ckpt.json"
+    replaced: list[tuple[Path, Path]] = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        replaced.append((Path(src), Path(dst)))
+        assert Path(src).read_text().strip().endswith("}")  # the temp file is complete
+        real_replace(src, dst)
+
+    monkeypatch.setattr("automation_toolkit.workflow.os.replace", spy)
+    fsyncs: list[int] = []
+    monkeypatch.setattr("automation_toolkit.workflow.os.fsync", lambda fd: fsyncs.append(fd))
+    workflow = Workflow("atomic").add_step("a", lambda ctx: 1).add_step("b", failing_times(1))
+    with pytest.raises(WorkflowError):
+        workflow.run(checkpoint=path)
+    assert replaced == [(path.with_name("ckpt.json.tmp"), path)]
+    assert len(fsyncs) == 2  # the temporary file, then its directory
+    assert not path.with_name("ckpt.json.tmp").exists()
+
+
+def test_crash_during_checkpoint_write_leaves_previous_checkpoint_intact(tmp_path, monkeypatch):
+    path = tmp_path / "ckpt.json"
+    workflow = Workflow("crash")
+    workflow.add_step("a", lambda ctx: "a")
+    workflow.add_step("b", lambda ctx: "b")
+    workflow.add_step("c", lambda ctx: "c")
+    saved = 0
+    real_replace = os.replace
+
+    def crash_on_second(src, dst):
+        nonlocal saved
+        saved += 1
+        if saved == 2:
+            raise KeyboardInterrupt  # power loss between writing temp and renaming
+        real_replace(src, dst)
+
+    monkeypatch.setattr("automation_toolkit.workflow.os.replace", crash_on_second)
+    with pytest.raises(KeyboardInterrupt):
+        workflow.run(checkpoint=path)
+    monkeypatch.undo()
+    assert [c["name"] for c in read_checkpoint(path)["payload"]["completed"]] == ["a"]
+    assert path.with_name("ckpt.json.tmp").exists()  # orphan from the interrupted write
+    result = workflow.run(checkpoint=path)
+    assert result.restored == ["a"] and result.succeeded
+    assert not path.exists() and not path.with_name("ckpt.json.tmp").exists()
+
+
+def _edit_payload(path: Path, edit) -> None:
+    document = read_checkpoint(path)
+    edit(document["payload"])
+    document["checksum"] = WorkflowCheckpoint._checksum(document["payload"])
+    path.write_text(json.dumps(document))
+
+
+CORRUPTIONS = {
+    "invalid json": lambda path: path.write_text("{not json"),
+    "empty file": lambda path: path.write_text(""),
+    "list document": lambda path: path.write_text("[]"),
+    "empty mapping": lambda path: path.write_text("{}"),
+    "extra top-level key": lambda path: path.write_text(
+        json.dumps({**read_checkpoint(path), "note": 1})
+    ),
+    "payload not a mapping": lambda path: path.write_text(
+        json.dumps({"payload": [], "checksum": "x"})
+    ),
+    "checksum tampered": lambda path: path.write_text(
+        json.dumps({**read_checkpoint(path), "checksum": "0" * 64})
+    ),
+    "output tampered without rechecksum": lambda path: path.write_text(
+        path.read_text().replace('"step": "load"', '"step": "evil"')
+    ),
+    "wrong version": lambda path: _edit_payload(path, lambda p: p.update(version=99)),
+    "missing version": lambda path: _edit_payload(path, lambda p: p.pop("version")),
+    "other workflow": lambda path: _edit_payload(path, lambda p: p.update(workflow="other")),
+    "steps renamed": lambda path: _edit_payload(path, lambda p: p["steps"].__setitem__(1, "x")),
+    "step added": lambda path: _edit_payload(path, lambda p: p["steps"].append("extra")),
+    "step removed": lambda path: _edit_payload(path, lambda p: p["steps"].pop()),
+    "completed not a list": lambda path: _edit_payload(path, lambda p: p.update(completed={})),
+    "completed entry not a mapping": lambda path: _edit_payload(
+        path, lambda p: p["completed"].__setitem__(0, "load")
+    ),
+    "completed not a prefix": lambda path: _edit_payload(
+        path, lambda p: p["completed"].__setitem__(0, {"name": "publish", "output": 1})
+    ),
+    "completed out of order": lambda path: _edit_payload(
+        path, lambda p: p["completed"].insert(0, {"name": "transform", "output": 1})
+    ),
+    "completed longer than workflow": lambda path: _edit_payload(
+        path, lambda p: p["completed"].extend({"name": n, "output": 1} for n in "tpq")
+    ),
+    "completed entry without output": lambda path: _edit_payload(
+        path, lambda p: p["completed"][0].pop("output")
+    ),
+    "data not a mapping": lambda path: _edit_payload(path, lambda p: p.update(data=[])),
+    "missing completed": lambda path: _edit_payload(path, lambda p: p.pop("completed")),
+    "missing data": lambda path: _edit_payload(path, lambda p: p.pop("data")),
+    "truncated file": lambda path: path.write_text(path.read_text()[:-15]),
+    "binary garbage": lambda path: path.write_bytes(b"\x00\xff\xfe garbage"),
+    "path is a directory": lambda path: (path.unlink(), path.mkdir()),
+}
+
+
+@pytest.mark.parametrize("corruption", sorted(CORRUPTIONS))
+def test_corrupted_checkpoint_is_discarded_and_workflow_starts_fresh(tmp_path, caplog, corruption):
+    path = tmp_path / "ckpt.json"
+    calls: list[str] = []
+    workflow = counting_workflow(calls, fail_at="transform")
+    with pytest.raises(WorkflowError):
+        workflow.run({"arm": True}, checkpoint=path)
+    CORRUPTIONS[corruption](path)
+    calls.clear()
+    with caplog.at_level(logging.WARNING):
+        if corruption == "path is a directory":
+            # Unusable *and* unwritable: the run restarts and fails to save the first step.
+            with pytest.raises(WorkflowError, match="Cannot write workflow checkpoint") as info:
+                workflow.run({"arm": False}, checkpoint=path)
+            assert calls == ["load"] and info.value.step == "load"
+            assert info.value.result.skipped == ["transform", "publish"]
+            return
+        result = workflow.run({"arm": False}, checkpoint=path)
+    assert "Ignoring unusable workflow checkpoint" in caplog.text
+    assert "for 'ckpt'" in caplog.text
+    assert calls == ["load", "transform", "publish"]  # everything re-ran
+    assert result.succeeded and not result.resumed and result.restored == []
+    assert not path.exists()
+
+
+def test_corruption_messages_are_specific(tmp_path, caplog):
+    path = tmp_path / "ckpt.json"
+    workflow = counting_workflow([], fail_at="transform")
+    with pytest.raises(WorkflowError):
+        workflow.run(checkpoint=path)
+    original = path.read_text()
+    expectations = {
+        "checksum tampered": "checksum does not match",
+        "wrong version": "unsupported checkpoint version 99",
+        "other workflow": "written for workflow 'other'",
+        "step added": "steps have changed",
+        "completed not a prefix": "not a prefix",
+        "completed entry without output": "has no output",
+        "invalid json": "Expecting",
+        "empty mapping": "not a workflow checkpoint document",
+    }
+    for name, fragment in expectations.items():
+        path.write_text(original)
+        CORRUPTIONS[name](path)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert WorkflowCheckpoint(path).load(workflow) is None
+        assert fragment in caplog.text, name
+        assert not path.exists()
+
+
+def test_checkpoint_for_different_step_order_is_rejected(tmp_path, caplog):
+    path = tmp_path / "ckpt.json"
+    first = Workflow("w").add_step("a", lambda ctx: 1).add_step("b", failing_times(5))
+    with pytest.raises(WorkflowError):
+        first.run(checkpoint=path)
+    reordered = Workflow("w").add_step("b", lambda ctx: 1).add_step("a", lambda ctx: 2)
+    with caplog.at_level(logging.WARNING):
+        result = reordered.run(checkpoint=path)
+    assert "steps have changed" in caplog.text and not result.resumed
+
+
+def test_non_serializable_output_fails_explicitly_and_keeps_earlier_checkpoint(tmp_path):
+    path = tmp_path / "ckpt.json"
+    workflow = Workflow("json")
+    workflow.add_step("a", lambda ctx: {"ok": [1, 2.5, None, "x"]})
+    workflow.add_step("b", lambda ctx: object())
+    workflow.add_step("c", lambda ctx: 3)
+    with pytest.raises(WorkflowError, match="must be JSON serializable") as info:
+        workflow.run(checkpoint=path)
+    assert "after step 'b'" in str(info.value) and info.value.step == "b"
+    assert info.value.result.step("b").succeeded  # the step itself did not fail
+    assert info.value.result.skipped == ["c"]
+    assert isinstance(info.value.__cause__, TypeError)
+    assert [c["name"] for c in read_checkpoint(path)["payload"]["completed"]] == ["a"]
+
+
+def test_non_serializable_shared_data_fails_explicitly(tmp_path):
+    path = tmp_path / "ckpt.json"
+    workflow = Workflow("data").add_step("a", lambda ctx: ctx.__setitem__("obj", set()))
+    with pytest.raises(WorkflowError, match="shared data must be JSON serializable"):
+        workflow.run(checkpoint=path)
+    assert not path.exists()
+
+
+def test_unwritable_checkpoint_location_is_a_workflow_error(tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    workflow = Workflow("w").add_step("a", lambda ctx: 1)
+    with pytest.raises(WorkflowError, match="Cannot write workflow checkpoint") as info:
+        workflow.run(checkpoint=blocker / "ckpt.json")
+    assert isinstance(info.value.__cause__, OSError) and info.value.step == "a"
+
+
+def test_clear_tolerates_missing_files_and_warns_on_os_errors(tmp_path, caplog, monkeypatch):
+    checkpoint = WorkflowCheckpoint(tmp_path / "missing.json")
+    checkpoint.clear()  # nothing to do, no error
+    assert checkpoint.load(Workflow("w").add_step("a", print)) is None
+    target = tmp_path / "ckpt.json"
+    target.write_text("{}")
+
+    def deny(self):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(Path, "unlink", deny)
+    with caplog.at_level(logging.WARNING):
+        WorkflowCheckpoint(target).clear()
+    assert "Cannot remove workflow checkpoint" in caplog.text and "read-only" in caplog.text
+
+
+def test_save_records_only_the_succeeded_prefix(tmp_path):
+    workflow = Workflow("prefix")
+    workflow.add_step("a", lambda ctx: 1)
+    workflow.add_step("b", failing_times(9), continue_on_error=True)
+    workflow.add_step("c", lambda ctx: 3)
+    result = workflow.run()
+    checkpoint = WorkflowCheckpoint(tmp_path / "c.json")
+    checkpoint.save(workflow, result.steps, result.context)
+    payload = read_checkpoint(checkpoint.path)["payload"]
+    assert [c["name"] for c in payload["completed"]] == ["a"]  # c is not a prefix member
+    assert payload["version"] == 1 and payload["saved_at"].endswith("+00:00")
+    assert payload["completed"][0]["finished_at"].endswith("+00:00")
+    restored = checkpoint.load(workflow)
+    assert restored is not None and restored.data == {}
+
+
+def test_checkpoint_with_timeouts_and_retries_resumes_after_timeout(tmp_path):
+    path = tmp_path / "ckpt.json"
+    release = threading.Event()
+    calls: list[str] = []
+    workflow = Workflow("timed-ckpt", sleep=FakeClock())
+    workflow.add_step("quick", lambda ctx: calls.append("quick") or "q", timeout=5)
+    workflow.add_step("slow", lambda ctx: release.wait(30), timeout=0.05, retries=1)
+    with pytest.raises(WorkflowError, match="timed out"):
+        workflow.run(checkpoint=path)
+    release.set()
+    rerun = Workflow("timed-ckpt")
+    rerun.add_step("quick", lambda ctx: calls.append("quick") or "q", timeout=5)
+    rerun.add_step("slow", lambda ctx: "fast now", timeout=5)
+    result = rerun.run(checkpoint=path)
+    assert calls == ["quick"] and result.restored == ["quick"]
+    assert result.outputs["slow"] == "fast now"
+
+
+# --- Timed-out attempts cannot alter the live context -----------------------------------
+
+
+def test_abandoned_attempt_writes_do_not_reach_the_live_context():
+    release, wrote = threading.Event(), threading.Event()
+
+    def late_writer(ctx):
+        release.wait(30)
+        ctx["late"] = "written after timeout"
+        ctx.outputs["forged"] = "injected"
+        del ctx.data["keep"]
+        wrote.set()
+        return "late value"
+
+    workflow = Workflow("isolation")
+    workflow.add_step("slow", late_writer, timeout=0.05, continue_on_error=True)
+    workflow.add_step("after", lambda ctx: dict(ctx.data))
+    result = workflow.run({"keep": 1})
+    release.set()
+    assert wrote.wait(5)
+    assert result.context.data == {"keep": 1}
+    assert dict(result.outputs) == {"after": {"keep": 1}}
+    assert "forged" not in result.outputs and "late" not in result.context
+    assert result.step("slow").output is None and result.step("slow").timed_out
+
+
+def test_abandoned_attempt_cannot_alter_what_a_checkpoint_records(tmp_path):
+    path = tmp_path / "ckpt.json"
+    release, wrote = threading.Event(), threading.Event()
+
+    def late_writer(ctx):
+        release.wait(30)
+        ctx["poison"] = True
+        wrote.set()
+
+    workflow = Workflow("ckpt-isolation")
+    workflow.add_step("slow", late_writer, timeout=0.05, continue_on_error=True)
+    workflow.add_step("ok", lambda ctx: "ok")
+    workflow.add_step("fail", failing_times(9))
+    with pytest.raises(WorkflowError):
+        workflow.run(checkpoint=path)
+    release.set()
+    assert wrote.wait(5)
+    assert read_checkpoint(path)["payload"]["data"] == {}
+    assert [c["name"] for c in read_checkpoint(path)["payload"]["completed"]] == []
+
+
+def test_in_time_attempt_changes_are_merged_into_the_live_context():
+    def writer(ctx):
+        ctx["added"] = ctx["seed"] + 1
+        del ctx.data["seed"]
+        return "ok"
+
+    result = Workflow("merge").add_step("w", writer, timeout=5).run({"seed": 41})
+    assert result.context.data == {"added": 42}
+    assert result.outputs["w"] == "ok"
+
+
+def test_timed_attempt_sees_earlier_outputs_but_cannot_rewrite_them():
+    def tamper(ctx):
+        assert ctx.outputs["first"] == 1
+        ctx.outputs["first"] = "tampered"
+        return 2
+
+    result = (
+        Workflow("ro-outputs")
+        .add_step("first", lambda ctx: 1)
+        .add_step("second", tamper, timeout=5)
+        .run()
+    )
+    assert dict(result.outputs) == {"first": 1, "second": 2}
+
+
+def test_failed_timed_attempt_discards_its_partial_writes_before_retry():
+    attempts = {"n": 0}
+
+    def half_done(ctx):
+        attempts["n"] += 1
+        ctx["partial"] = attempts["n"]
+        if attempts["n"] == 1:
+            raise OSError("midway")
+        return ctx.get("partial")
+
+    result = Workflow("partial").add_step("s", half_done, retries=1, timeout=5).run()
+    assert result.context.data == {"partial": 2} and result.outputs["s"] == 2
+
+
+def test_timed_out_step_followed_by_a_step_that_relies_on_untouched_data():
+    release = threading.Event()
+
+    def slow_mutator(ctx):
+        ctx["counter"] = ctx["counter"] + 100
+        release.wait(30)
+
+    workflow = Workflow("sequence")
+    workflow.add_step("slow", slow_mutator, timeout=0.05, retries=2, continue_on_error=True)
+    workflow.add_step("sum", lambda ctx: ctx["counter"])
+    result = workflow.run({"counter": 1})
+    release.set()
+    assert result.outputs["sum"] == 1 and result.step("slow").attempts == 3
+
+
+# --- JSON reporting ----------------------------------------------------------------------
+
+
+def test_json_report_of_a_failed_resumed_run_covers_statuses_retries_errors_and_restored(
+    tmp_path,
+):
+    path = tmp_path / "ckpt.json"
+    workflow = Workflow("json", sleep=FakeClock())
+    workflow.add_step("load", lambda ctx: {"rows": 3})
+    workflow.add_step("fail", failing_times(9, error=OSError), retries=1, retry_delay=0.5)
+    with pytest.raises(WorkflowError):
+        workflow.run(checkpoint=path)
+
+    rerun = Workflow("json", sleep=FakeClock())
+    rerun.add_step("load", lambda ctx: {"rows": 3})
+    rerun.add_step("fail", failing_times(1, error=OSError), retries=2, retry_delay=0.5)
+    rerun.add_step("optional", failing_times(9, error=ValueError), continue_on_error=True)
+    rerun.add_step("break", failing_times(9, error=RuntimeError))
+    rerun.add_step("never", lambda ctx: None)
+    # The checkpoint was written for ["load", "fail"]; the step list changed, so it is
+    # discarded and the run starts fresh. Build the matching workflow instead.
+    workflow = Workflow("json", sleep=FakeClock())
+    workflow.add_step("load", lambda ctx: {"rows": 3})
+    workflow.add_step("fail", failing_times(1, error=OSError), retries=2, retry_delay=0.5)
+    with pytest.raises(WorkflowError) as info:
+        rerun.run(checkpoint=path)
+    report = json.loads(info.value.result.to_json())
+
+    assert report["report_version"] == 1 and report["workflow"] == "json"
+    assert report["succeeded"] is False and report["resumed"] is False
+    assert report["generated_at"].endswith("+00:00")
+    assert report["summary"] == "Workflow 'json': 5 steps, 2 succeeded, 2 failed, 1 skipped"
+    assert report["counts"] == {"pending": 0, "succeeded": 2, "failed": 2, "skipped": 1}
+    assert report["failed"] == ["optional", "break"] and report["skipped"] == ["never"]
+    assert report["restored"] == []
+    assert [s["name"] for s in report["steps"]] == ["load", "fail", "optional", "break", "never"]
+
+    load, fail, optional, broke, never = report["steps"]
+    assert load["status"] == "succeeded" and load["output"] == {"rows": 3}
+    assert load["attempts"] == 1 and load["retries"] == 0 and load["errors"] == []
+    assert load["error"] is None and load["traceback"] is None and load["timed_out"] is False
+    assert load["output_serializable"] is True
+    assert load["started_at"].endswith("+00:00") and load["finished_at"] >= load["started_at"]
+
+    assert fail["status"] == "succeeded" and fail["attempts"] == 2 and fail["retries"] == 1
+    assert fail["errors"] == [
+        {"attempt": 1, "type": "OSError", "message": "try 1", "delay_before_retry": 0.5}
+    ]
+    assert fail["error"] is None and fail["output"] == 2
+
+    assert optional["status"] == "failed" and optional["retries"] == 0
+    assert optional["error"] == {"type": "ValueError", "message": "try 1"}
+    assert optional["errors"][0]["delay_before_retry"] is None
+    assert optional["traceback"].startswith("Traceback") and optional["output"] is None
+
+    assert broke["status"] == "failed" and broke["error"]["type"] == "RuntimeError"
+    assert never == {
+        "name": "never",
+        "status": "skipped",
+        "restored": False,
+        "attempts": 0,
+        "retries": 0,
+        "duration_seconds": 0.0,
+        "started_at": None,
+        "finished_at": None,
+        "timed_out": False,
+        "error": None,
+        "errors": [],
+        "traceback": None,
+        "output": None,
+        "output_serializable": True,
+    }
+    assert report["duration_seconds"] == pytest.approx(
+        sum(s["duration_seconds"] for s in report["steps"])
+    )
+
+
+def test_json_report_marks_restored_steps(tmp_path):
+    path = tmp_path / "ckpt.json"
+    workflow = (
+        Workflow("restored").add_step("a", lambda ctx: [1, 2]).add_step("b", failing_times(1))
+    )
+    with pytest.raises(WorkflowError):
+        workflow.run(checkpoint=path)
+    report = workflow.run(checkpoint=path).to_dict()
+    assert report["succeeded"] and report["resumed"] and report["restored"] == ["a"]
+    a, b = report["steps"]
+    assert a["restored"] is True and a["output"] == [1, 2] and a["started_at"] is None
+    assert a["attempts"] == 1 and a["retries"] == 0
+    assert b["restored"] is False and b["output"] == 2
+
+
+def test_json_report_records_timeouts_with_backoff(tmp_path):
+    release = threading.Event()
+    workflow = Workflow("timeouts", sleep=FakeClock())
+    workflow.add_step("slow", lambda ctx: release.wait(30), timeout=0.05, retries=1, retry_delay=1)
+    with pytest.raises(WorkflowError) as info:
+        workflow.run()
+    release.set()
+    step = info.value.result.to_dict()["steps"][0]
+    assert step["timed_out"] is True and step["attempts"] == 2 and step["retries"] == 1
+    assert [e["type"] for e in step["errors"]] == ["StepTimeoutError", "StepTimeoutError"]
+    assert (
+        step["errors"][0]["delay_before_retry"] == 1
+        and step["errors"][1]["delay_before_retry"] is None
+    )
+    assert "timed out after 0.05s" in step["error"]["message"]
+
+
+def test_json_report_replaces_non_serializable_outputs():
+    marker = object()
+    result = (
+        Workflow("objects").add_step("obj", lambda ctx: marker).add_step("n", lambda ctx: 1).run()
+    )
+    report = json.loads(result.to_json())  # must not raise
+    obj, n = report["steps"]
+    assert obj["output"] == repr(marker) and obj["output_serializable"] is False
+    assert n["output"] == 1 and n["output_serializable"] is True
+    compact = result.to_json(indent=None)
+    assert "\n" not in compact and json.loads(compact)["workflow"] == "objects"
+
+
+def test_write_json_creates_parents_and_reports_write_errors(tmp_path):
+    result = Workflow("write").add_step("a", lambda ctx: "x").run()
+    target = result.write_json(tmp_path / "out" / "nested" / "report.json")
+    assert target == tmp_path / "out" / "nested" / "report.json"
+    assert json.loads(target.read_text(encoding="utf-8"))["steps"][0]["output"] == "x"
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file")
+    with pytest.raises(WorkflowError, match="Cannot write workflow report") as info:
+        result.write_json(blocker / "report.json")
+    assert isinstance(info.value.__cause__, OSError)
+    assert result.write_json(str(tmp_path / "s.json")).exists()
+
+
+def test_step_result_to_dict_matches_object_state():
+    step = Workflow("one").add_step("a", failing_times(2), retries=2).run().step("a")
+    data = step.to_dict()
+    assert data["attempts"] == 3 and data["retries"] == 2 and data["output"] == 3
+    assert [e["attempt"] for e in data["errors"]] == [1, 2]
+    assert all(e["delay_before_retry"] == 0.0 for e in data["errors"])
+    assert data["duration_seconds"] == step.duration_seconds
+
+
+def test_run_rejects_non_mapping_initial_data_and_bad_checkpoint_types(tmp_path):
+    workflow = Workflow("args").add_step("a", lambda ctx: 1)
+    with pytest.raises(WorkflowError, match="initial_data must be a mapping, got list"):
+        workflow.run([("a", 1)])
+    with pytest.raises(WorkflowError, match="initial_data must be a mapping, got str"):
+        workflow.run("a=1")
+    with pytest.raises(WorkflowError, match="checkpoint must be a path or WorkflowCheckpoint"):
+        workflow.run(checkpoint=5)
+    assert workflow.run(checkpoint=tmp_path / "ok.json").succeeded  # PathLike accepted
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_checkpoint_with_invalid_attempt_count_is_discarded(tmp_path, caplog):
+    path = tmp_path / "ckpt.json"
+    workflow = counting_workflow([], fail_at="transform")
+    with pytest.raises(WorkflowError):
+        workflow.run(checkpoint=path)
+    for bad in ("3", -1, True, 2.5):
+        _edit_payload(path, lambda p, bad=bad: p["completed"][0].update(attempts=bad))
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert WorkflowCheckpoint(path).load(workflow) is None
+        assert "invalid attempt count" in caplog.text
+        with pytest.raises(WorkflowError):
+            workflow.run(checkpoint=path)
+    _edit_payload(path, lambda p: p["completed"][0].pop("attempts"))  # older file: default 1
+    restored = WorkflowCheckpoint(path).load(workflow)
+    assert restored is not None
+    result = Workflow("ckpt")
+    for name in ("load", "transform", "publish"):
+        result.add_step(name, lambda ctx, n=name: n)
+    assert result.run(checkpoint=path).step("load").attempts == 1
+
+
+def test_deeply_nested_checkpoint_is_discarded_not_crashing(tmp_path, caplog):
+    path = tmp_path / "ckpt.json"
+    path.write_text("[" * 100_000 + "]" * 100_000)
+    with caplog.at_level(logging.WARNING):
+        assert WorkflowCheckpoint(path).load(Workflow("w").add_step("a", print)) is None
+    assert "Ignoring unusable workflow checkpoint" in caplog.text and not path.exists()
+
+
+def test_json_report_rejects_nan_and_infinity_outputs():
+    result = Workflow("nan").add_step("n", lambda ctx: float("nan")).run()
+    report = result.to_dict()["steps"][0]
+    assert report["output"] == "nan" and report["output_serializable"] is False
+    nested = Workflow("inf").add_step("n", lambda ctx: {"v": float("inf")}).run().to_json()
+    assert (
+        "Infinity" not in nested and json.loads(nested)["steps"][0]["output_serializable"] is False
+    )
+
+
+def test_write_json_is_atomic_and_leaves_no_temporary_file(tmp_path, monkeypatch):
+    result = Workflow("w").add_step("a", lambda ctx: 1).run()
+    target = tmp_path / "r.json"
+    replaced: list[Path] = []
+    real = os.replace
+    monkeypatch.setattr(
+        "automation_toolkit.workflow.os.replace",
+        lambda s, d: (replaced.append(Path(s)), real(s, d)),
+    )
+    result.write_json(target)
+    assert replaced == [tmp_path / "r.json.tmp"] and not (tmp_path / "r.json.tmp").exists()
+    assert json.loads(target.read_text())["workflow"] == "w"

@@ -13,6 +13,17 @@ flowchart TD
     Reporting --> Publish[Staged run publication]
 ```
 
+`processing/profiling.py` is independent of the sales schema: it streams any CSV
+in chunks with the standard `csv` module (the configured delimiter and encoding
+apply, and the exact field count per record is visible) into an incremental
+`DatasetProfiler` and returns a `DatasetProfile`. Each statistic is held by an
+accumulator that is associative over chunks - counters, running moments at three
+power-of-two scales, an exact integer sum, a 64-bit hash set for distinct rows, a
+16-byte-per-value count table that keeps text only for the best-ranked values, and a
+positional bottom-k median sketch - so the result is independent of the chunk size and
+memory is bounded by one chunk plus the distinct values. `profile_cli` and
+`reporting/profile_report.py` are its adapters. It does not touch the pipeline.
+
 `ingestion` normalizes headers and attaches source-file and row provenance.
 `processing` owns all checks and calculations. `reporting` receives validated
 transactions and precomputed metrics; it never rereads inputs. `pipeline` owns
@@ -114,8 +125,13 @@ as the step's failure. Python cannot kill a thread, so the abandoned attempt kee
 running until it returns; its return value or exception is discarded and never reaches
 `outputs`. Timeouts are therefore meant for actions that are safe to abandon or that
 honor their own deadline, and the thread-based design works from the GUI's worker
-thread as well, which a `signal`-based alarm would not. Steps without a timeout run
-inline in the caller's thread exactly as before.
+thread as well, which a `signal`-based alarm would not. A timed attempt never receives
+the live context: it works on a private copy whose `data` is merged back only when the
+attempt returns in time, and its return value is only recorded then. An abandoned
+attempt keeps writing into its detached copy, so it cannot change what later steps, the
+result or a checkpoint observe. The copy is shallow, so mutating a list or frame stored
+in `data` in place is not isolated. Steps without a timeout run inline in the caller's
+thread exactly as before.
 
 When the attempts are exhausted and the step is required, the remaining steps are
 marked skipped and `WorkflowError` is raised with the original exception chained, the
@@ -132,8 +148,48 @@ the returned result then reports `succeeded == False` and lists the failed step 
 Only `Exception` subclasses are handled: `KeyboardInterrupt` and `SystemExit` propagate
 immediately, also from a timed step's helper thread and from an interrupted retry wait.
 `WorkflowError` is a `ToolkitError`, so the CLI's existing error mapping applies. The
-engine deliberately offers no parallelism, branching or persistence; the shared
-`pipeline` does not depend on it and keeps its staged publication behavior unchanged.
+engine deliberately offers no parallelism or branching; the shared `pipeline` does not
+depend on it and keeps its staged publication behavior unchanged.
+
+Checkpointing follows the same principles as the chunked-CSV checkpoint.
+`Workflow.run(checkpoint=path)` writes `WorkflowCheckpoint` after every succeeded step:
+a JSON document whose payload names the workflow, its ordered step names, the format
+version, the completed prefix (name, output, attempts, duration, finish time) and the
+shared `data`, plus a SHA-256 checksum of the canonical payload. The file is written to
+a sibling temporary file, fsynced and atomically renamed, so a crash mid-write leaves
+the previous checkpoint intact and at most an orphan temporary file that the next run
+removes. On start the checkpoint is validated end to end: document shape, checksum,
+version, workflow name, identical step list, completed entries forming a prefix of that
+list, each with an output. Any inconsistency discards the file with a warning naming
+the reason and the run starts from the first step rather than trusting partial state.
+Only the succeeded prefix is recorded, so a failed `continue_on_error` step and every
+later step run again on resume. Restored outputs are placed in `outputs`; the
+checkpointed `data` fills the context and the `initial_data` of the resuming run
+overrides it key by key, so an operator can correct an input and resume while values
+produced by completed steps are kept. Restored steps are marked `restored` and have no
+attempts of their own.
+Outputs and `data` must be JSON serializable; a value that is not stops the run with a
+`WorkflowError` naming the step while the step itself counts as succeeded and the
+earlier checkpoint stays usable. A completed run deletes its checkpoint. Values pass
+through JSON, so tuples come back as lists and non-string dictionary keys as strings;
+keep file paths and plain data in the context rather than frames or objects. The
+fingerprint covers the workflow name and step names only, so changing a step's retries
+or timeout keeps a checkpoint valid while renaming, adding or reordering steps
+invalidates it. A checkpoint belongs to one run at a time: two processes resuming the
+same file concurrently are not supported. Because the file is complete after every
+step, a process killed by `SIGKILL` or a power loss resumes from the last completed step;
+the attempt that was running is repeated.
+
+`WorkflowResult.to_dict` renders the same facts as the text report as a versioned,
+JSON-ready mapping (`report_version`): summary, counts, failed, skipped and restored
+step names and, per step, status, attempts, retries, each attempt's error with the delay
+waited before the retry, the last traceback, timing, timeout and restore flags and the
+output. Outputs that are not JSON serializable are replaced by their `repr` and flagged
+so the report can always be written. `workflow_cli.py` is a thin adapter over the engine,
+like `cli.py` over the pipeline: it imports a `Workflow` (or factory) from a module or
+file, builds the initial data, delegates to `Workflow.run` with an optional checkpoint,
+prints the text or JSON report and maps outcomes to exit codes (0 success, 2 optional
+failures only, 1 failure or usage error, 130 interrupted with the checkpoint kept).
 
 ## Output integrity and safety
 

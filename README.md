@@ -41,9 +41,11 @@ performs that batch workflow and keeps rejected-row diagnostics for review.
 | Trends | Calendar months, Sunday-ending weeks and month-over-month percentage change |
 | Excel reports | Summary, Transactions, Categories, Products, Monthly Trends, Weekly Trends, Period Comparison, Validation Errors |
 | PDF and charts | Cover with KPIs, four charts, data-quality counts and generation date |
-| Interfaces | CLI and optional CustomTkinter desktop app share one pipeline |
+| Interfaces | CLI and optional CustomTkinter desktop app share one pipeline; a workflow CLI runs and resumes custom workflows |
 | Run integrity | Staged publication, unique output folders and a manifest with source checksums |
-| Workflow engine | Sequential named steps with a shared context, exponential-backoff retries, per-step timeouts, fail-fast or continue-on-error handling and per-attempt failure reports |
+| Dataset profiling | `automation-toolkit-profile` summarizes any CSV: missing values, duplicate/blank/short rows, inferred column types, value statistics and warnings, as text or JSON |
+| Large dataset profiling | Chunked streaming with bounded memory and chunk-size-independent results; measured by a 100,000-row time and memory benchmark |
+| Workflow engine | Sequential named steps with a shared context, exponential-backoff retries, per-step timeouts, checkpoint and resume, fail-fast or continue-on-error handling, text and JSON result reports |
 | Developer workflow | Type hints, logging, pytest, Ruff, coverage gate and GitHub Actions |
 
 ## Quick start
@@ -115,6 +117,12 @@ automation-toolkit --input big_export.csv --output reports --chunk-size 50000 --
 # Also export validation statistics (by check, column and file) as data_quality.json
 automation-toolkit --input examples/sample_sales_dirty.csv --output reports --format excel --quality-report
 
+# Run a workflow defined in Python, saving progress so an interrupted run resumes
+automation-toolkit-workflow --workflow my_flows.py:nightly --checkpoint .checkpoints/nightly.json --json-report reports/nightly.json
+
+# Profile any CSV (missing values, duplicates, column types) and save the profile as JSON
+automation-toolkit-profile --input examples/sample_sales_dirty.csv --json reports/profile.json
+
 # Install and launch the optional desktop application
 python -m pip install -e '.[gui]'
 automation-toolkit-gui
@@ -166,6 +174,7 @@ report contents, literal Excel strings, invalid configuration and failed writes.
 
 ```bash
 python scripts/benchmark.py --rows 100000 --format all --json docs/benchmark.json
+python scripts/benchmark_profiling.py --rows 100000 --json docs/benchmark_profiling.json
 ```
 
 The included [benchmark result](docs/benchmark.json) records one Linux x86_64 run
@@ -183,14 +192,14 @@ still applies. Test the benchmark on the deployment machine before sizing a work
 
 ```text
 src/automation_toolkit/
-  cli.py, config.py, pipeline.py, workflow.py
+  cli.py, config.py, pipeline.py, workflow.py, workflow_cli.py, profile_cli.py
   ingestion/       CSV/XLSX readers and schema normalization
-  processing/      Cleaning, validation and business analytics
-  reporting/       Excel, PDF and charts
+  processing/      Cleaning, validation, business analytics and dataset profiling
+  reporting/       Excel, PDF, charts and JSON exports
   gui/             Optional desktop adapter
 tests/             Unit, regression and end-to-end tests
 examples/          Synthetic data, control totals and generated reports
-scripts/           Deterministic fixture generation and benchmark
+scripts/           Deterministic fixture generation and benchmarks
 docs/              Architecture, usage, measurements and previews
 .github/workflows/ Automated quality checks
 ```

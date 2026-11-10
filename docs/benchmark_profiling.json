@@ -1,0 +1,101 @@
+{
+  "python": "3.13.5",
+  "platform": "Linux",
+  "architecture": "x86_64",
+  "rows": 100000,
+  "columns": 7,
+  "input_bytes": 5544009,
+  "baseline_rss_mb": 68.3,
+  "identical_across_chunk_sizes": true,
+  "runs": [
+    {
+      "chunk_size": 50000,
+      "requested_chunk_size": null,
+      "chunks": 2,
+      "seconds": 0.53,
+      "rows_per_second": 188730,
+      "tracemalloc_peak_mb": 53.7,
+      "process_peak_rss_mb": 220.6,
+      "summary": {
+        "rows": 100000,
+        "columns": 7,
+        "total_cells": 700000,
+        "missing_cells": 41791,
+        "missing_cells_percent": 5.97,
+        "rows_with_missing": 40099,
+        "complete_rows": 59901,
+        "duplicate_rows": 100,
+        "duplicate_rows_percent": 0.1,
+        "blank_rows": 199,
+        "short_rows": 166
+      }
+    },
+    {
+      "chunk_size": 10000,
+      "requested_chunk_size": 10000,
+      "chunks": 10,
+      "seconds": 0.544,
+      "rows_per_second": 183965,
+      "tracemalloc_peak_mb": 22.2,
+      "process_peak_rss_mb": 220.6,
+      "summary": {
+        "rows": 100000,
+        "columns": 7,
+        "total_cells": 700000,
+        "missing_cells": 41791,
+        "missing_cells_percent": 5.97,
+        "rows_with_missing": 40099,
+        "complete_rows": 59901,
+        "duplicate_rows": 100,
+        "duplicate_rows_percent": 0.1,
+        "blank_rows": 199,
+        "short_rows": 166
+      }
+    },
+    {
+      "chunk_size": 50000,
+      "requested_chunk_size": 50000,
+      "chunks": 2,
+      "seconds": 0.52,
+      "rows_per_second": 192331,
+      "tracemalloc_peak_mb": 53.7,
+      "process_peak_rss_mb": 220.6,
+      "summary": {
+        "rows": 100000,
+        "columns": 7,
+        "total_cells": 700000,
+        "missing_cells": 41791,
+        "missing_cells_percent": 5.97,
+        "rows_with_missing": 40099,
+        "complete_rows": 59901,
+        "duplicate_rows": 100,
+        "duplicate_rows_percent": 0.1,
+        "blank_rows": 199,
+        "short_rows": 166
+      }
+    },
+    {
+      "chunk_size": 200000,
+      "requested_chunk_size": 200000,
+      "chunks": 1,
+      "seconds": 0.592,
+      "rows_per_second": 168938,
+      "tracemalloc_peak_mb": 98.8,
+      "process_peak_rss_mb": 297.2,
+      "summary": {
+        "rows": 100000,
+        "columns": 7,
+        "total_cells": 700000,
+        "missing_cells": 41791,
+        "missing_cells_percent": 5.97,
+        "rows_with_missing": 40099,
+        "complete_rows": 59901,
+        "duplicate_rows": 100,
+        "duplicate_rows_percent": 0.1,
+        "blank_rows": 199,
+        "short_rows": 166
+      }
+    }
+  ],
+  "method": "Synthetic messy CSV profiled per chunk size; generation excluded. Time and memory come from separate passes because tracemalloc slows the run down by about ten times. process_peak_rss_mb never shrinks, so it is cumulative across runs; tracemalloc_peak_mb is per run."
+}
