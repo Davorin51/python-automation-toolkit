@@ -2,6 +2,91 @@
 
 ## Unreleased
 
+- Add anomaly detection: `processing/anomalies.py` (`detect_outliers_csv`,
+  `detect_outliers_frame`, incremental `OutlierDetector`) finds IQR outliers in the
+  numeric columns of any CSV - per column the quartiles, the Tukey fence
+  `[Q1 - factor*IQR, Q3 + factor*IQR]` (factor 1.5 by default), low/high outlier counts
+  and the most extreme values with their row numbers. Missing cells (empty,
+  whitespace-only, short-row), placeholders (NA, null, ...; `--null-token` adds more)
+  and non-numeric text are excluded and counted separately with warnings; columns under
+  90% numeric are skipped with a warning unless requested with `--column`. The new
+  `automation-toolkit-anomalies` command prints the summary and writes JSON (`--json`,
+  `schema_version` 1); `--strict` returns exit status 2 when outliers are found, and
+  unreadable files raise `IngestionError` (exit status 1) exactly like the profiler.
+  Results are independent of the chunk size. Existing commands, the profiler and the
+  pipeline are unchanged.
+- Add the modified z-score as a second anomaly detection method; IQR stays the
+  default and its results and options are unchanged. `--method modified_zscore`
+  (CLI) or `method="modified_zscore"` (`detect_outliers_csv`, `detect_outliers_frame`,
+  `OutlierDetector`) flags values whose modified z-score `0.6745 * (x - median) / MAD`
+  exceeds `--threshold`/`threshold` (default 3.5, Iglewicz & Hoaglin) - the fence
+  `median +/- threshold * MAD / 0.6745`, so counts, bounds, row numbers and examples
+  work exactly like the IQR fence and are equally independent of the chunk size
+  (checked on 400 random messy files at chunk sizes 1 to 100,000). Median-based twice
+  over, it tolerates up to half the values being extreme where the quartile fence
+  breaks down beyond a quarter. A MAD of 0 flags every value differing from the
+  median, with a warning, like an IQR of 0; median or MAD beyond the float range is
+  reported as null with the existing fence warning. `--factor` with
+  `--method modified_zscore` (or `--threshold` with `iqr`) is rejected. The JSON
+  `schema_version` is now 2: new `threshold` (report) and `median`/`mad` (column)
+  keys, null under the method that does not use them; everything else is unchanged
+  and the memory and speed of IQR scans are unaffected.
+- Anomaly detection review fixes (API and CLI unchanged; results identical to the
+  previous release on 400 random messy files with custom tokens at chunk sizes 1 to
+  100,000, plus the earlier differential suites):
+  - Fix numeric placeholder tokens (`--null-token -999`, `null_tokens=["9999"]`) being
+    ignored since the parse-first speedup: such cells were accepted as numbers and
+    shifted the quartiles. They are placeholders again, matched on the stripped,
+    case-folded text as before (`-999.0` is not the token `-999`). Scans without a
+    numeric token run at the same speed as before.
+  - The "column skipped: only N% of its values are numeric" warning no longer rounds
+    up to the 90% threshold; a column at 89.6% now says `89.6%` instead of `90%`.
+    Other shares are formatted as before.
+- Anomaly detection performance and extreme-value fixes (API, CLI options, exit codes
+  and JSON keys unchanged; results identical to before on 300 random messy files and 16
+  hand-built edge cases - duplicate/blank headers, invalid numerics, empty datasets,
+  extreme floats - at chunk sizes 1 to 100,000):
+  - Faster parsing: every cell is parsed as-is first, and only the cells that fail are
+    stripped, matched against placeholder tokens and retried (only when stripping
+    changed the text). On 1,000,000 rows with three numeric columns the scan went from
+    1.6 s to 1.4 s, on a 100-column file from 0.8 s to 0.5 s, and on a file with 25%
+    missing/placeholder/invalid cells from 0.8 s to 0.7 s. Classification is unchanged:
+    pandas parses an ASCII-padded number exactly like its stripped text, and everything
+    else still goes through the old path.
+  - Default chunks are now also capped at about 32 million characters, exactly like the
+    profiler: a 2,000-row file with 100 KB fields went from 383 MB to 65 MB peak traced
+    memory. An explicit `--chunk-size` is never split further.
+  - Fix a crash (`OverflowError`) when an outlier example lies near the float maximum
+    (such as 1.7e308 beyond a finite fence): rounding it to 15 significant digits could
+    round past the largest float. The value is now reported unrounded.
+  - Outlier distances beyond the float range (a value at -1e308 against a fence at
+    1e308) no longer emit a `RuntimeWarning`; the value still counts and ranks first.
+  - Regression tests cover padded numbers (ASCII and non-breaking-space) keeping row
+    order, decimal commas, `inf`/`0x10`/`1_000`/`true` as invalid, `nan` as a
+    placeholder, duplicate and blank headers scanned separately, header-only and
+    blank-row-only datasets, subnormals, negative zero and both overflow fixes.
+- Anomaly detection memory and correctness fixes (API, CLI options, exit codes and
+  JSON keys unchanged; results identical to before for ordinary data, checked on 300
+  random messy files at chunk sizes 1 to 100,000):
+  - Memory: values are kept in fixed-size 8-byte blocks and the rows that held them as
+    1 bit per row, instead of an 8-byte row number per value and one array per chunk.
+    Peak traced memory on 1,000,000 rows with three numeric columns went from 95 MB to
+    50 MB; with `--column` from 77 MB to 34 MB (and 2.8x faster), because columns that
+    were not requested are no longer stored; at `--chunk-size 1` from 5.9 MB to 0.5 MB
+    on 20,000 rows (per-chunk array overhead is gone). Outliers are counted block by
+    block with no full-size masks or distance arrays.
+  - Fix a `TypeError` in the text report when only one side of the fence exceeds the
+    float range (for example quartiles 0 and 1e308); that bound is shown as `inf` and is
+    `null` in JSON, with a new "fence extends beyond the float range" warning (also
+    emitted when both sides overflow, which previously returned null bounds silently).
+  - Fix contradictory output for very small spreads: with an IQR below 0.001 the
+    quartiles, bounds and example values are reported with enough decimals to show
+    three significant digits of the IQR (previously Q1, Q3 and both bounds could all
+    print as 0.123457 while a value was flagged). Other numbers keep the previous
+    6-decimal rounding.
+  - Regression tests compare counts, bounds, row numbers and example order with a
+    brute-force reference across chunk, block and bit-packing boundaries, and cover
+    blank lines, short and multi-line records, fence ties and repeated `result()` calls.
 - Add dataset profiling: `processing/profiling.py` (`profile_csv`, `profile_frame`)
   summarizes any CSV regardless of schema - row/column counts, missing cells,
   duplicate, blank and short rows, per-column inferred type, placeholder and

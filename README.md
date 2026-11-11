@@ -45,6 +45,7 @@ performs that batch workflow and keeps rejected-row diagnostics for review.
 | Run integrity | Staged publication, unique output folders and a manifest with source checksums |
 | Dataset profiling | `automation-toolkit-profile` summarizes any CSV: missing values, duplicate/blank/short rows, inferred column types, value statistics and warnings, as text or JSON |
 | Large dataset profiling | Chunked streaming with bounded memory and chunk-size-independent results; measured by a 100,000-row time and memory benchmark |
+| Anomaly detection | `automation-toolkit-anomalies` finds outliers in numeric CSV columns via Tukey's IQR fence or the modified z-score (median/MAD), with row numbers of the most extreme values and missing/placeholder/invalid cells excluded and counted |
 | Workflow engine | Sequential named steps with a shared context, exponential-backoff retries, per-step timeouts, checkpoint and resume, fail-fast or continue-on-error handling, text and JSON result reports |
 | Developer workflow | Type hints, logging, pytest, Ruff, coverage gate and GitHub Actions |
 
@@ -122,6 +123,9 @@ automation-toolkit-workflow --workflow my_flows.py:nightly --checkpoint .checkpo
 
 # Profile any CSV (missing values, duplicates, column types) and save the profile as JSON
 automation-toolkit-profile --input examples/sample_sales_dirty.csv --json reports/profile.json
+
+# Find IQR outliers in the numeric columns of any CSV and save the result as JSON
+automation-toolkit-anomalies --input examples/sample_sales_dirty.csv --json reports/anomalies.json
 
 # Install and launch the optional desktop application
 python -m pip install -e '.[gui]'

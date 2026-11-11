@@ -1,0 +1,2043 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 2ce17f4..aa1363b 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,91 @@
+ 
+ ## Unreleased
+ 
++- Add anomaly detection: `processing/anomalies.py` (`detect_outliers_csv`,
++  `detect_outliers_frame`, incremental `OutlierDetector`) finds IQR outliers in the
++  numeric columns of any CSV - per column the quartiles, the Tukey fence
++  `[Q1 - factor*IQR, Q3 + factor*IQR]` (factor 1.5 by default), low/high outlier counts
++  and the most extreme values with their row numbers. Missing cells (empty,
++  whitespace-only, short-row), placeholders (NA, null, ...; `--null-token` adds more)
++  and non-numeric text are excluded and counted separately with warnings; columns under
++  90% numeric are skipped with a warning unless requested with `--column`. The new
++  `automation-toolkit-anomalies` command prints the summary and writes JSON (`--json`,
++  `schema_version` 1); `--strict` returns exit status 2 when outliers are found, and
++  unreadable files raise `IngestionError` (exit status 1) exactly like the profiler.
++  Results are independent of the chunk size. Existing commands, the profiler and the
++  pipeline are unchanged.
++- Add the modified z-score as a second anomaly detection method; IQR stays the
++  default and its results and options are unchanged. `--method modified_zscore`
++  (CLI) or `method="modified_zscore"` (`detect_outliers_csv`, `detect_outliers_frame`,
++  `OutlierDetector`) flags values whose modified z-score `0.6745 * (x - median) / MAD`
++  exceeds `--threshold`/`threshold` (default 3.5, Iglewicz & Hoaglin) - the fence
++  `median +/- threshold * MAD / 0.6745`, so counts, bounds, row numbers and examples
++  work exactly like the IQR fence and are equally independent of the chunk size
++  (checked on 400 random messy files at chunk sizes 1 to 100,000). Median-based twice
++  over, it tolerates up to half the values being extreme where the quartile fence
++  breaks down beyond a quarter. A MAD of 0 flags every value differing from the
++  median, with a warning, like an IQR of 0; median or MAD beyond the float range is
++  reported as null with the existing fence warning. `--factor` with
++  `--method modified_zscore` (or `--threshold` with `iqr`) is rejected. The JSON
++  `schema_version` is now 2: new `threshold` (report) and `median`/`mad` (column)
++  keys, null under the method that does not use them; everything else is unchanged
++  and the memory and speed of IQR scans are unaffected.
++- Anomaly detection review fixes (API and CLI unchanged; results identical to the
++  previous release on 400 random messy files with custom tokens at chunk sizes 1 to
++  100,000, plus the earlier differential suites):
++  - Fix numeric placeholder tokens (`--null-token -999`, `null_tokens=["9999"]`) being
++    ignored since the parse-first speedup: such cells were accepted as numbers and
++    shifted the quartiles. They are placeholders again, matched on the stripped,
++    case-folded text as before (`-999.0` is not the token `-999`). Scans without a
++    numeric token run at the same speed as before.
++  - The "column skipped: only N% of its values are numeric" warning no longer rounds
++    up to the 90% threshold; a column at 89.6% now says `89.6%` instead of `90%`.
++    Other shares are formatted as before.
++- Anomaly detection performance and extreme-value fixes (API, CLI options, exit codes
++  and JSON keys unchanged; results identical to before on 300 random messy files and 16
++  hand-built edge cases - duplicate/blank headers, invalid numerics, empty datasets,
++  extreme floats - at chunk sizes 1 to 100,000):
++  - Faster parsing: every cell is parsed as-is first, and only the cells that fail are
++    stripped, matched against placeholder tokens and retried (only when stripping
++    changed the text). On 1,000,000 rows with three numeric columns the scan went from
++    1.6 s to 1.4 s, on a 100-column file from 0.8 s to 0.5 s, and on a file with 25%
++    missing/placeholder/invalid cells from 0.8 s to 0.7 s. Classification is unchanged:
++    pandas parses an ASCII-padded number exactly like its stripped text, and everything
++    else still goes through the old path.
++  - Default chunks are now also capped at about 32 million characters, exactly like the
++    profiler: a 2,000-row file with 100 KB fields went from 383 MB to 65 MB peak traced
++    memory. An explicit `--chunk-size` is never split further.
++  - Fix a crash (`OverflowError`) when an outlier example lies near the float maximum
++    (such as 1.7e308 beyond a finite fence): rounding it to 15 significant digits could
++    round past the largest float. The value is now reported unrounded.
++  - Outlier distances beyond the float range (a value at -1e308 against a fence at
++    1e308) no longer emit a `RuntimeWarning`; the value still counts and ranks first.
++  - Regression tests cover padded numbers (ASCII and non-breaking-space) keeping row
++    order, decimal commas, `inf`/`0x10`/`1_000`/`true` as invalid, `nan` as a
++    placeholder, duplicate and blank headers scanned separately, header-only and
++    blank-row-only datasets, subnormals, negative zero and both overflow fixes.
++- Anomaly detection memory and correctness fixes (API, CLI options, exit codes and
++  JSON keys unchanged; results identical to before for ordinary data, checked on 300
++  random messy files at chunk sizes 1 to 100,000):
++  - Memory: values are kept in fixed-size 8-byte blocks and the rows that held them as
++    1 bit per row, instead of an 8-byte row number per value and one array per chunk.
++    Peak traced memory on 1,000,000 rows with three numeric columns went from 95 MB to
++    50 MB; with `--column` from 77 MB to 34 MB (and 2.8x faster), because columns that
++    were not requested are no longer stored; at `--chunk-size 1` from 5.9 MB to 0.5 MB
++    on 20,000 rows (per-chunk array overhead is gone). Outliers are counted block by
++    block with no full-size masks or distance arrays.
++  - Fix a `TypeError` in the text report when only one side of the fence exceeds the
++    float range (for example quartiles 0 and 1e308); that bound is shown as `inf` and is
++    `null` in JSON, with a new "fence extends beyond the float range" warning (also
++    emitted when both sides overflow, which previously returned null bounds silently).
++  - Fix contradictory output for very small spreads: with an IQR below 0.001 the
++    quartiles, bounds and example values are reported with enough decimals to show
++    three significant digits of the IQR (previously Q1, Q3 and both bounds could all
++    print as 0.123457 while a value was flagged). Other numbers keep the previous
++    6-decimal rounding.
++  - Regression tests compare counts, bounds, row numbers and example order with a
++    brute-force reference across chunk, block and bit-packing boundaries, and cover
++    blank lines, short and multi-line records, fence ties and repeated `result()` calls.
+ - Add dataset profiling: `processing/profiling.py` (`profile_csv`, `profile_frame`)
+   summarizes any CSV regardless of schema - row/column counts, missing cells,
+   duplicate, blank and short rows, per-column inferred type, placeholder and
+diff --git a/README.md b/README.md
+index a799a99..311fde8 100644
+--- a/README.md
++++ b/README.md
+@@ -45,6 +45,7 @@ performs that batch workflow and keeps rejected-row diagnostics for review.
+ | Run integrity | Staged publication, unique output folders and a manifest with source checksums |
+ | Dataset profiling | `automation-toolkit-profile` summarizes any CSV: missing values, duplicate/blank/short rows, inferred column types, value statistics and warnings, as text or JSON |
+ | Large dataset profiling | Chunked streaming with bounded memory and chunk-size-independent results; measured by a 100,000-row time and memory benchmark |
++| Anomaly detection | `automation-toolkit-anomalies` finds outliers in numeric CSV columns via Tukey's IQR fence or the modified z-score (median/MAD), with row numbers of the most extreme values and missing/placeholder/invalid cells excluded and counted |
+ | Workflow engine | Sequential named steps with a shared context, exponential-backoff retries, per-step timeouts, checkpoint and resume, fail-fast or continue-on-error handling, text and JSON result reports |
+ | Developer workflow | Type hints, logging, pytest, Ruff, coverage gate and GitHub Actions |
+ 
+@@ -123,6 +124,9 @@ automation-toolkit-workflow --workflow my_flows.py:nightly --checkpoint .checkpo
+ # Profile any CSV (missing values, duplicates, column types) and save the profile as JSON
+ automation-toolkit-profile --input examples/sample_sales_dirty.csv --json reports/profile.json
+ 
++# Find IQR outliers in the numeric columns of any CSV and save the result as JSON
++automation-toolkit-anomalies --input examples/sample_sales_dirty.csv --json reports/anomalies.json
++
+ # Install and launch the optional desktop application
+ python -m pip install -e '.[gui]'
+ automation-toolkit-gui
+diff --git a/docs/usage.md b/docs/usage.md
+index fe798c4..34cb082 100644
+--- a/docs/usage.md
++++ b/docs/usage.md
+@@ -454,6 +454,134 @@ for chunk in chunks:
+ profile = profiler.result()
+ ```
+ 
++## Detecting outliers in numeric columns
++
++`automation-toolkit-anomalies` (or `python -m automation_toolkit.anomaly_cli`) scans
++the numeric columns of any CSV for outliers. Like the profiler, it does not require
++the sales schema and never rejects rows; it only reports. Two methods are available
++(`--method`, default `iqr`), and both report a "normal range" fence and every value
++outside it:
++
++- `iqr`: the first and third quartile and the Tukey fence
++  `[Q1 - factor * IQR, Q3 + factor * IQR]`.
++- `modified_zscore`: the median and the median absolute deviation (MAD); a value is an
++  outlier when its modified z-score `0.6745 * (x - median) / MAD` exceeds
++  `--threshold`, i.e. it lies outside `median +/- threshold * MAD / 0.6745`.
++
++```bash
++automation-toolkit-anomalies --input examples/sample_sales_dirty.csv
++automation-toolkit-anomalies --input export.csv --json reports/anomalies.json --strict
++# A wider fence, only one column, semicolon-delimited input
++automation-toolkit-anomalies --input export.csv --delimiter ";" --factor 3 --column unit_price
++# The modified z-score instead of the quartile fence, with a stricter cutoff
++automation-toolkit-anomalies --input export.csv --method modified_zscore --threshold 3
++```
++
++The delimiter, encoding and chunk size come from `--config` (same YAML as the
++pipeline) and can be overridden with `--delimiter`, `--encoding` and `--chunk-size`.
++`--factor` sets the IQR fence multiplier (default 1.5, the usual convention; 3 is a
++common choice for flagging only extreme values; 0 flags everything outside the
++quartiles). `--threshold` sets the modified z-score cutoff (default 3.5, the usual
++convention from Iglewicz & Hoaglin; 0 flags everything except the median). Each
++option belongs to its method; combining `--factor` with `--method modified_zscore`
++(or `--threshold` with `iqr`) is an error. The result lists, per column, the values
++used, the method's measures (quartiles and IQR, or median and MAD), the fence, the
++low/high outlier counts and percentage, and up to five of the most extreme outliers
++with their row numbers (record numbers in the file, header included, matching
++`source_row` elsewhere).
++
++Both methods exclude the same cells, run on the same streamed chunks and report the
++same shape of result; they differ only in where the fence sits. The quartile fence
++breaks down when more than a quarter of the values are extreme (the quartiles
++themselves move into the contamination), while the median fence tolerates up to half;
++on the other hand `modified_zscore` is stricter on clean, skewed data. A MAD of 0 (at
++least half the values identical) flags every differing value, with a warning, exactly
++like an IQR of 0. Columns with fewer than four numeric values report no fence under
++either method.
++
++Missing and invalid values never abort the scan; they are excluded from the
++calculation and reported:
++
++- Missing cells - empty, whitespace-only, or absent because the record was short -
++  are counted per column as `missing`.
++- Placeholder text such as `NA`, `N/A`, `null`, `None` or `-` is counted as
++  `null_like`, with a warning; `--null-token TEXT` (repeatable, case-insensitive)
++  adds your own. A numeric sentinel works too (`--null-token -999`): cells whose
++  stripped text equals it are placeholders, while `-999.0` stays a number.
++- Any other non-numeric text is counted as `invalid`, with a warning naming up to
++  three examples. A value beyond the float range (for example `1e400`) also counts
++  as invalid. Numbers are compared as 64-bit floats, so integers beyond 2**53 lose
++  precision here (unlike in the profiler's exact statistics).
++
++Without `--column`, a column is scanned when at least 90% of its parsed (non-missing,
++non-placeholder) values are numeric; below that it is skipped with a warning naming
++the numeric share, and a column with no numeric values at all is skipped silently.
++`--column NAME` (repeatable) restricts the scan to the named columns and analyzes
++them even when they are mostly non-numeric; an unknown name is an error. Column
++names are the profiler's unique display names, so duplicated headers are `a`,
++`a_2`, ... and blank headers `column_<position>`. A column with fewer than four
++numeric values reports no bounds, with a warning, because quartiles of so few values
++say little. A constant column (IQR of 0) is flagged, since every deviating value then
++counts as an outlier.
++
++Quartiles use linear interpolation between the two nearest values (NumPy's default
++method, the same as Excel's `QUARTILE.INC`). A value exactly on a fence is not an
++outlier. The reported "most extreme" examples are ordered by distance outside the
++nearest fence, ties by row number. Quartiles, bounds and values are rounded like the
++profiler's statistics (6 decimals, at least 6 significant digits); when the IQR is
++below 0.001 more decimals are kept so it shows three significant digits. A fence that
++exceeds the float range (data near `1e308`) is `null` in JSON, `inf` in the text
++report, and produces a warning: nothing can lie outside it on that side.
++
++Files are streamed in chunks exactly like the profiler, and every reported number,
++row number and example is independent of the chunk size. Without an explicit
++`--chunk-size`, chunks are capped at 50,000 records and about 32 million characters
++(like the profiler), so files with very long fields use smaller chunks. Memory is one
++chunk plus, for each scanned column, 8 bytes per numeric value and 1 bit per row; with
++`--column` the other columns are not stored at all. Computing the quartiles makes one
++temporary copy of one column's values at a time. On 1,000,000 rows with three numeric
++columns the traced peak is about 50 MB (34 MB with a single `--column`), so a column
++of N numbers needs roughly 16 x N bytes at its peak; the same scan takes about 1.4
++seconds (one Linux x86_64 measurement, not a guarantee). Cells are parsed first and
++only the failures are stripped and classified, so clean numeric data is scanned at
++full speed and messy data costs only in proportion to its messy cells.
++
++Values at the edge of the float range are safe: an outlier at `1.7e308` is reported
++unrounded (rounding it could exceed the largest float), a distance that overflows
++counts as infinite and ranks first among the examples, and subnormal values such as
++`5e-324` are ordinary numbers.
++
++| Exit status | Meaning |
++| --- | --- |
++| 0 | Every input was scanned |
++| 2 | With `--strict`: every input was scanned but at least one contains outliers |
++| 1 | An input is missing, empty, undecodable or malformed, or the options are invalid (unknown column, negative factor or threshold, a cutoff option combined with the other method); readable inputs are still scanned |
++
++`--json PATH` writes one result object (`schema_version` 2: `source`, `method`,
++`factor`, `threshold`, `summary`, `warnings`, `columns`), or a list of them for
++several inputs. The method that is not in use reports `null` for its keys: under
++`iqr` each column fills `q1`/`q3`/`iqr` and leaves `median`/`mad` null, and the
++reverse under `modified_zscore`; `lower_bound`/`upper_bound`, counts and examples
++mean the same under both. (Schema version 1 lacked `threshold`, `median` and `mad`;
++everything it had is unchanged.) From Python:
++
++```python
++from automation_toolkit.processing.anomalies import detect_outliers_csv, detect_outliers_frame
++
++report = detect_outliers_csv("export.csv", factor=1.5, columns=["unit_price"])
++robust = detect_outliers_csv("export.csv", method="modified_zscore", threshold=3.5)
++print(report.to_text())
++data = report.to_dict()
++
++# Or feed your own chunks (columns in header order, None = absent field)
++from automation_toolkit.processing.anomalies import OutlierDetector
++
++detector = OutlierDetector(["id", "amount"], source="stream")
++for chunk in chunks:
++    detector.update(chunk)
++report = detector.result()
++```
++
+ ## Outputs and exit status
+ 
+ The console prints the completed run directory. `all` writes:
+diff --git a/pyproject.toml b/pyproject.toml
+index 1b555fb..ade0d6c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -24,6 +24,7 @@ automation-toolkit = "automation_toolkit.cli:main"
+ automation-toolkit-gui = "automation_toolkit.gui.app:main"
+ automation-toolkit-workflow = "automation_toolkit.workflow_cli:main"
+ automation-toolkit-profile = "automation_toolkit.profile_cli:main"
++automation-toolkit-anomalies = "automation_toolkit.anomaly_cli:main"
+ 
+ [tool.setuptools.packages.find]
+ where = ["src"]
+diff --git a/src/automation_toolkit/anomaly_cli.py b/src/automation_toolkit/anomaly_cli.py
+new file mode 100644
+index 0000000..a781bde
+--- /dev/null
++++ b/src/automation_toolkit/anomaly_cli.py
+@@ -0,0 +1,175 @@
++"""Scan one or more CSV datasets for outliers from the terminal.
++
++Prints, for every numeric column, the normal range and the values outside it, with row
++numbers, and optionally writes the full result as JSON. The sales schema is *not*
++required: any delimited text file can be scanned. ``--method`` picks the fence: ``iqr``
++(the default, quartiles widened by ``--factor``) or ``modified_zscore`` (values whose
++modified z-score ``0.6745 * (x - median) / MAD`` exceeds ``--threshold``).
++
++Exit status: 0 when every file was scanned, 1 when any file could not be read
++(missing, empty, undecodable or malformed) or the options are invalid. With
++``--strict``, 2 when all files were scanned but outliers were found in at least one.
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import logging
++from collections.abc import Sequence
++from dataclasses import replace
++from pathlib import Path
++
++from automation_toolkit import __version__
++from automation_toolkit.config import check_chunk_size, load_config
++from automation_toolkit.exceptions import ToolkitError
++from automation_toolkit.processing.anomalies import (
++    DEFAULT_IQR_FACTOR,
++    DEFAULT_ZSCORE_THRESHOLD,
++    METHODS,
++    AnomalyReport,
++    detect_outliers_csv,
++)
++
++EXIT_OK = 0
++EXIT_FAILED = 1
++EXIT_OUTLIERS = 2
++
++logger = logging.getLogger(__name__)
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        description="Detect outliers in the numeric columns of CSV datasets."
++    )
++    parser.add_argument("--version", action="version", version=__version__)
++    parser.add_argument("--input", type=Path, nargs="+", required=True, help="CSV files")
++    parser.add_argument("--config", type=Path, help="YAML config (delimiter, encoding, chunk size)")
++    parser.add_argument("--delimiter", help="CSV delimiter (overrides csv_delimiter)")
++    parser.add_argument("--encoding", help="CSV encoding (overrides csv_encoding)")
++    parser.add_argument(
++        "--chunk-size",
++        type=int,
++        metavar="ROWS",
++        help="Records processed per chunk (overrides csv_chunk_size; default 50000)",
++    )
++    parser.add_argument(
++        "--method",
++        choices=METHODS,
++        default="iqr",
++        help="How to draw the fence: Tukey's IQR (default) or the modified z-score "
++        "(median and MAD based; sturdier when many values are extreme)",
++    )
++    parser.add_argument(
++        "--factor",
++        type=float,
++        default=None,
++        metavar="F",
++        help="IQR fence multiplier: outliers lie outside [Q1 - F*IQR, Q3 + F*IQR] "
++        "(default 1.5; larger keeps more values; iqr method only)",
++    )
++    parser.add_argument(
++        "--threshold",
++        type=float,
++        default=None,
++        metavar="T",
++        help="Modified z-score cutoff: outliers have |0.6745*(x-median)/MAD| > T "
++        "(default 3.5; larger keeps more values; modified_zscore method only)",
++    )
++    parser.add_argument(
++        "--column",
++        action="append",
++        default=None,
++        metavar="NAME",
++        help="Scan only this column, even if it is mostly non-numeric (repeatable)",
++    )
++    parser.add_argument(
++        "--null-token",
++        action="append",
++        default=[],
++        metavar="TEXT",
++        help="Extra placeholder text treated like NA (repeatable, case-insensitive)",
++    )
++    parser.add_argument(
++        "--json",
++        type=Path,
++        metavar="PATH",
++        help="Write the result as JSON to PATH (a list when several inputs are given)",
++    )
++    parser.add_argument(
++        "--strict", action="store_true", help="Exit with status 2 when any outliers are found"
++    )
++    parser.add_argument("--verbose", action="store_true")
++    return parser
++
++
++def main(argv: Sequence[str] | None = None) -> int:
++    args = build_parser().parse_args(argv)
++    logging.basicConfig(
++        level=logging.DEBUG if args.verbose else logging.WARNING,
++        format="%(levelname)s %(name)s: %(message)s",
++    )
++    if args.factor is not None and args.method != "iqr":
++        logger.error("--factor applies to --method iqr; use --threshold instead.")
++        return EXIT_FAILED
++    if args.threshold is not None and args.method != "modified_zscore":
++        logger.error("--threshold applies to --method modified_zscore; use --factor instead.")
++        return EXIT_FAILED
++    try:
++        config = load_config(args.config)
++        if args.delimiter is not None:
++            config = replace(config, csv_delimiter=args.delimiter)
++        if args.encoding is not None:
++            config = replace(config, csv_encoding=args.encoding)
++        if args.chunk_size is not None:
++            check_chunk_size(args.chunk_size)
++    except (ToolkitError, ValueError) as exc:
++        logger.error("%s", exc)
++        return EXIT_FAILED
++
++    reports: list[AnomalyReport] = []
++    failed = False
++    for path in args.input:
++        try:
++            report = detect_outliers_csv(
++                path,
++                config,
++                factor=DEFAULT_IQR_FACTOR if args.factor is None else args.factor,
++                method=args.method,
++                threshold=(DEFAULT_ZSCORE_THRESHOLD if args.threshold is None else args.threshold),
++                columns=args.column,
++                chunk_size=args.chunk_size,
++                null_tokens=args.null_token,
++            )
++        except (ToolkitError, ValueError) as exc:
++            logger.error("%s", exc)
++            failed = True
++            continue
++        reports.append(report)
++        if len(reports) > 1:
++            print()
++        print(report.to_text())
++
++    if args.json is not None and reports:
++        try:
++            args.json.parent.mkdir(parents=True, exist_ok=True)
++            payload = (
++                reports[0].to_dict() if len(args.input) == 1 else [r.to_dict() for r in reports]
++            )
++            args.json.write_text(
++                json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
++            )
++        except OSError as exc:
++            logger.error("Cannot write %s: %s", args.json, exc)
++            return EXIT_FAILED
++        print(f"\nOutlier JSON: {args.json.resolve()}")
++
++    if failed:
++        return EXIT_FAILED
++    if args.strict and any(r.total_outliers for r in reports):
++        return EXIT_OUTLIERS
++    return EXIT_OK
++
++
++if __name__ == "__main__":  # pragma: no cover
++    raise SystemExit(main())
+diff --git a/src/automation_toolkit/processing/anomalies.py b/src/automation_toolkit/processing/anomalies.py
+new file mode 100644
+index 0000000..9199adf
+--- /dev/null
++++ b/src/automation_toolkit/processing/anomalies.py
+@@ -0,0 +1,749 @@
++"""Outlier detection for the numeric columns of any CSV dataset.
++
++Like :mod:`automation_toolkit.processing.profiling`, this module is schema-agnostic:
++it accepts any delimited text file, never validates or rejects rows, and only reports.
++Two methods are available, both reporting the same "normal range" fence:
++
++* ``iqr`` (the default): the first and third quartile, the interquartile range (IQR)
++  and the Tukey fence ``[Q1 - factor * IQR, Q3 + factor * IQR]`` (``factor`` defaults
++  to the conventional 1.5).
++* ``modified_zscore``: the median and the median absolute deviation (MAD); a value is
++  an outlier when its modified z-score ``0.6745 * (x - median) / MAD`` exceeds
++  ``threshold`` (defaults to the conventional 3.5, Iglewicz & Hoaglin), which is the
++  fence ``median +/- threshold * MAD / 0.6745``. Being median-based twice over, it
++  tolerates many extreme values better than the quartile fence.
++
++Every column lists how many values fall outside the fence, with the most extreme
++examples and their row numbers.
++
++Missing cells (empty, whitespace-only, or absent because the record was short),
++placeholder text such as ``NA`` or ``null`` and non-numeric text are excluded from the
++calculation and counted separately, so the result says exactly which values it is based
++on. Without an explicit column selection, a column is analyzed when at least
++:data:`MOSTLY_NUMERIC` of its non-missing, non-placeholder values are numeric; a column
++below that is skipped with a warning naming the share, and a column with no numeric
++values at all is skipped silently. Columns requested by name are always analyzed.
++
++The file is streamed in chunks with the profiler's CSV reader, so short rows, blank
++rows and malformed records are treated exactly as in ``automation-toolkit-profile``,
++and the result does not depend on the chunk size. Numeric values are compared as
++64-bit floats (integers beyond 2**53 lose precision; a value beyond the float range
++counts as invalid). Memory is bounded by one chunk plus, per analyzed column, 8 bytes
++per numeric value and 1 bit per row (which rows held those values); computing the
++quartiles needs one further temporary copy of the values of one column at a time.
++"""
++
++from __future__ import annotations
++
++import csv
++import math
++from collections.abc import Iterable
++from dataclasses import dataclass, field
++from datetime import datetime
++from pathlib import Path
++from typing import Any
++
++import numpy as np
++import pandas as pd
++
++from automation_toolkit import __version__
++from automation_toolkit.config import Config, check_chunk_size
++from automation_toolkit.exceptions import IngestionError
++from automation_toolkit.processing.profiling import (
++    DEFAULT_CHUNK_CHARS,
++    NULL_TOKENS,
++    _column_names,
++    _default_chunk_size,
++    _percent,
++    _record_chunks,
++)
++
++#: Incremented when the rendered mapping changes in a way consumers must notice.
++#: Version 2: ``method`` can be ``modified_zscore``; new ``threshold`` (report) and
++#: ``median``/``mad`` (column) keys, ``null`` under the method that does not use them.
++SCHEMA_VERSION = 2
++#: Tukey's conventional fence multiplier.
++DEFAULT_IQR_FACTOR = 1.5
++#: Iglewicz & Hoaglin's conventional modified z-score cutoff.
++DEFAULT_ZSCORE_THRESHOLD = 3.5
++#: The modified z-score is ``ZSCORE_SCALE * (x - median) / MAD``: the MAD of a normal
++#: distribution is 0.6745 standard deviations, so the score reads like a z-score.
++ZSCORE_SCALE = 0.6745
++METHODS = ("iqr", "modified_zscore")
++#: Outlier examples reported per column (the most extreme first).
++EXAMPLE_LIMIT = 5
++#: Distinct invalid-text examples reported per column.
++INVALID_EXAMPLE_LIMIT = 3
++#: Quartiles of fewer values than this say little; such columns report no bounds.
++MIN_VALUES = 4
++#: Share of parsed values that must be numeric for a column to be auto-selected.
++MOSTLY_NUMERIC = 0.9
++
++
++@dataclass(frozen=True)
++class ColumnOutliers:
++    """The outlier analysis of one column.
++
++    ``q1``/``q3``/``iqr`` are filled by the ``iqr`` method, ``median``/``mad`` by
++    ``modified_zscore``; the other method's fields are ``None``. The fence
++    (``lower_bound``/``upper_bound``), counts and examples mean the same under both.
++    """
++
++    position: int
++    name: str
++    header: str
++    values: int
++    missing: int
++    null_like: int
++    invalid: int
++    q1: float | None
++    q3: float | None
++    iqr: float | None
++    lower_bound: float | None
++    upper_bound: float | None
++    outliers: int
++    outlier_percent: float
++    low_outliers: int
++    high_outliers: int
++    examples: list[dict[str, Any]] = field(default_factory=list)
++    warnings: list[str] = field(default_factory=list)
++    median: float | None = None
++    mad: float | None = None
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "position": self.position,
++            "name": self.name,
++            "header": self.header,
++            "values": self.values,
++            "missing": self.missing,
++            "null_like": self.null_like,
++            "invalid": self.invalid,
++            "q1": self.q1,
++            "q3": self.q3,
++            "iqr": self.iqr,
++            "median": self.median,
++            "mad": self.mad,
++            "lower_bound": self.lower_bound,
++            "upper_bound": self.upper_bound,
++            "outliers": self.outliers,
++            "outlier_percent": self.outlier_percent,
++            "low_outliers": self.low_outliers,
++            "high_outliers": self.high_outliers,
++            "examples": [dict(example) for example in self.examples],
++            "warnings": list(self.warnings),
++        }
++
++
++@dataclass(frozen=True)
++class AnomalyReport:
++    """Outlier results for one dataset.
++
++    ``factor`` is set under the ``iqr`` method and ``threshold`` under
++    ``modified_zscore``; the other is ``None``.
++    """
++
++    source: str
++    rows: int
++    factor: float | None
++    column_results: list[ColumnOutliers]
++    warnings: list[str] = field(default_factory=list)
++    generated_at: datetime = field(default_factory=lambda: datetime.now().replace(microsecond=0))
++    method: str = "iqr"
++    threshold: float | None = None
++
++    @property
++    def total_outliers(self) -> int:
++        return sum(column.outliers for column in self.column_results)
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "schema_version": SCHEMA_VERSION,
++            "toolkit_version": __version__,
++            "generated_at": self.generated_at.isoformat(),
++            "source": self.source,
++            "method": self.method,
++            "factor": self.factor,
++            "threshold": self.threshold,
++            "summary": {
++                "rows": self.rows,
++                "columns_analyzed": len(self.column_results),
++                "total_outliers": self.total_outliers,
++            },
++            "warnings": list(self.warnings),
++            "columns": [column.to_dict() for column in self.column_results],
++        }
++
++    def to_text(self) -> str:
++        """A compact, human-readable report for the terminal."""
++        if self.method == "iqr":
++            how = f"IQR factor {self.factor:g}"
++        else:
++            how = f"modified z-score threshold {self.threshold:g}"
++        lines = [
++            f"Outlier scan of {self.source} ({how})",
++            f"  Rows: {self.rows}  Columns analyzed: {len(self.column_results)}"
++            f"  Outliers: {self.total_outliers}",
++        ]
++        if self.column_results:
++            width = max(len("Column"), *(len(c.name) for c in self.column_results))
++            lines.append("")
++            lines.append(f"  {'Column'.ljust(width)}  {'Values':>8} {'Outliers':>12}  Normal range")
++            for c in self.column_results:
++                if c.q1 is None and c.median is None:
++                    bounds = "(not computed)"
++                else:
++                    low = "-inf" if c.lower_bound is None else f"{c.lower_bound:g}"
++                    high = "inf" if c.upper_bound is None else f"{c.upper_bound:g}"
++                    bounds = f"[{low}, {high}]"
++                outliers = f"{c.outliers} ({c.outlier_percent:g}%)"
++                lines.append(f"  {c.name.ljust(width)}  {c.values:>8} {outliers:>12}  {bounds}")
++            for c in self.column_results:
++                if c.examples:
++                    shown = ", ".join(f"{e['value']:g} (row {e['row']})" for e in c.examples)
++                    more = c.outliers - len(c.examples)
++                    suffix = f" and {more} more" if more else ""
++                    lines.append(f"  {c.name}: most extreme {shown}{suffix}")
++        issues = list(self.warnings) + [
++            f"{c.name}: {w}" for c in self.column_results for w in c.warnings
++        ]
++        if issues:
++            lines.append("")
++            lines.append("  Warnings:")
++            lines.extend(f"  - {issue}" for issue in issues)
++        return "\n".join(lines)
++
++
++#: Growable buffers start with blocks this small and double up to the maximum, so a
++#: column with a handful of values costs a few KB, and appending never copies data.
++_BLOCK_MIN = 256
++_BLOCK_MAX = 1 << 16
++#: Significant digits of the IQR that reported numbers always resolve (see _number).
++_SPREAD_DIGITS = 3
++
++
++class _Blocks:
++    """An append-only array stored as fixed-size blocks.
++
++    Unlike a list of per-chunk arrays (about 100 bytes of overhead each, so tiny chunks
++    multiplied memory) or one array grown by reallocation (a temporary copy on every
++    growth), filled blocks are never copied or reallocated.
++    """
++
++    def __init__(self, dtype: Any) -> None:
++        self.dtype = np.dtype(dtype)
++        self.blocks: list[np.ndarray] = []
++        self.size = 0
++        self._used = 0  # filled part of the last block
++
++    def append(self, values: np.ndarray) -> None:
++        start = 0
++        while start < values.size:
++            if not self.blocks or self._used == self.blocks[-1].size:
++                capacity = min(_BLOCK_MAX, max(_BLOCK_MIN, self.size))
++                self.blocks.append(np.empty(capacity, dtype=self.dtype))
++                self._used = 0
++            block = self.blocks[-1]
++            take = min(block.size - self._used, values.size - start)
++            block[self._used : self._used + take] = values[start : start + take]
++            self._used += take
++            start += take
++            self.size += take
++
++    def views(self) -> list[np.ndarray]:
++        """The stored values as a list of arrays (views, no copies)."""
++        if not self.blocks:
++            return []
++        return [*self.blocks[:-1], self.blocks[-1][: self._used]]
++
++    def copy(self) -> np.ndarray:
++        """All values as one new contiguous array."""
++        out = np.empty(self.size, dtype=self.dtype)
++        offset = 0
++        for view in self.views():
++            out[offset : offset + view.size] = view
++            offset += view.size
++        return out
++
++
++class _RowBits:
++    """One bit per row, set where the column held a numeric value."""
++
++    def __init__(self) -> None:
++        self.packed = _Blocks(np.uint8)
++        self.tail = np.zeros(0, dtype=bool)  # fewer than 8 bits not yet packed
++
++    def append(self, mask: np.ndarray) -> None:
++        bits = np.concatenate([self.tail, mask]) if self.tail.size else mask
++        full = bits.size - bits.size % 8
++        self.packed.append(np.packbits(bits[:full]))
++        self.tail = bits[full:].copy()
++
++    def rows_of(self, ordinals: list[int]) -> list[int]:
++        """Row indices (0-based) of the given 0-based ordinals among the set bits."""
++        wanted = sorted(set(ordinals))
++        found: dict[int, int] = {}
++        parts = self.packed.views()
++        if self.tail.size:
++            parts.append(np.packbits(self.tail))
++        seen = 0  # set bits in earlier parts
++        row = 0  # rows covered by earlier parts
++        for part in parts:
++            if not wanted:
++                break
++            bits = np.unpackbits(part)
++            count = int(bits.sum())
++            if wanted[0] < seen + count:
++                set_rows = np.flatnonzero(bits) + row
++                while wanted and wanted[0] < seen + count:
++                    ordinal = wanted.pop(0)
++                    found[ordinal] = int(set_rows[ordinal - seen])
++            seen += count
++            row += bits.size
++        return [found[o] for o in ordinals]
++
++
++class _ColumnState:
++    """Numeric values, the rows that held them and exclusion counts of one column."""
++
++    def __init__(self) -> None:
++        self.missing = 0
++        self.null_like = 0
++        self.invalid = 0
++        self.invalid_examples: list[str] = []
++        self.values = _Blocks(np.float64)
++        self.rows = _RowBits()
++
++
++def _number(value: float | None, spread: float | None = None) -> float | None:
++    """A JSON-safe float rounded for the report; ``None`` if missing or not finite.
++
++    Rounding is the profiler's: 6 decimals, never fewer than 6 significant digits. When
++    the interquartile range ``spread`` is so small that 6 decimals cannot resolve it
++    (below 0.001), more decimals are kept so it shows :data:`_SPREAD_DIGITS` significant
++    digits; otherwise the quartiles, both bounds and the outliers could all print as the
++    same number. Never more than 15 significant digits of the value itself, so float
++    noise such as ``22.749999999999996`` is still removed.
++    """
++    if value is None or not math.isfinite(value):
++        return None
++    value = float(value)
++    if value == 0:
++        return 0.0
++    magnitude = math.floor(math.log10(abs(value)))
++    decimals = max(6, 5 - magnitude)
++    if spread is not None and math.isfinite(spread) and spread > 0:
++        decimals = max(decimals, _SPREAD_DIGITS - 1 - math.floor(math.log10(spread)))
++    try:
++        return round(value, min(decimals, 14 - magnitude))
++    except OverflowError:  # rounding a value near the float limit can round past it
++        return value
++
++
++def _check_cutoff(value: float, name: str) -> float:
++    if isinstance(value, bool) or not isinstance(value, (int, float)):
++        raise ValueError(f"{name} must be a non-negative number.")
++    value = float(value)
++    if not math.isfinite(value) or value < 0:
++        raise ValueError(f"{name} must be a non-negative number.")
++    return value
++
++
++def _to_floats(parsed: pd.Series) -> np.ndarray:
++    """Parsed numbers as float64; a value beyond the float range becomes ``inf``."""
++    if parsed.dtype != object:
++        return parsed.to_numpy(dtype=float)
++    out = np.empty(len(parsed), dtype=float)  # Python ints beyond int64 arrive as objects
++    for i, value in enumerate(parsed.tolist()):
++        try:
++            out[i] = math.nan if value is None or value is pd.NA else float(value)
++        except (OverflowError, TypeError, ValueError):
++            out[i] = math.inf
++    return out
++
++
++class OutlierDetector:
++    """Incremental IQR detector: feed raw chunks with :meth:`update`, call :meth:`result`.
++
++    Chunks follow the :class:`~automation_toolkit.processing.profiling.DatasetProfiler`
++    convention: columns in header order, cells as raw text, ``None``/``NaN`` marking a
++    field absent because the record was short. ``first_row`` is the row number reported
++    for the first data row (``2`` for a CSV, where row 1 is the header).
++    """
++
++    def __init__(
++        self,
++        headers: Iterable[Any],
++        source: str = "<dataframe>",
++        *,
++        factor: float = DEFAULT_IQR_FACTOR,
++        method: str = "iqr",
++        threshold: float = DEFAULT_ZSCORE_THRESHOLD,
++        columns: Iterable[str] | None = None,
++        null_tokens: Iterable[str] | None = None,
++        first_row: int = 1,
++    ) -> None:
++        if method not in METHODS:
++            raise ValueError(f"method must be one of: {', '.join(METHODS)} (got {method!r})")
++        self.source = source
++        self.method = method
++        self.factor = _check_cutoff(factor, "factor")
++        self.threshold = _check_cutoff(threshold, "threshold")
++        self.first_row = first_row
++        headers = ["" if pd.isna(h) else str(h).strip() for h in headers]
++        self.names, _ = _column_names(headers)
++        self.headers = headers
++        self.requested = list(dict.fromkeys(columns)) if columns is not None else None
++        if self.requested is not None:
++            unknown = [name for name in self.requested if name not in self.names]
++            if unknown:
++                raise ValueError(
++                    "Unknown column(s): "
++                    + ", ".join(unknown)
++                    + "; available: "
++                    + ", ".join(self.names)
++                )
++        self.null_tokens = NULL_TOKENS | {
++            t.strip().lower() for t in (null_tokens or ()) if t.strip()
++        }
++        #: Placeholder tokens that are themselves numbers (a ``-999`` sentinel). The fast
++        #: path classifies only cells that fail to parse, so these need a separate check.
++        tokens = sorted(self.null_tokens)
++        parsed_tokens = _to_floats(pd.to_numeric(pd.Series(tokens, dtype=object), errors="coerce"))
++        self._numeric_tokens = frozenset(
++            t for t, v in zip(tokens, parsed_tokens, strict=True) if math.isfinite(v)
++        )
++        self._states = [_ColumnState() for _ in self.names]
++        #: Positions of the columns worth accumulating: with an explicit selection the
++        #: other columns can never be reported, so they are not stored at all.
++        self._tracked = [
++            i
++            for i, name in enumerate(self.names)
++            if self.requested is None or name in self.requested
++        ]
++        self.rows = 0
++
++    def update(self, chunk: pd.DataFrame) -> None:
++        width = len(self.names)
++        if chunk.shape[1] != width:
++            raise ValueError(f"chunk has {chunk.shape[1]} columns; expected {width}")
++        if len(chunk) == 0:
++            return
++        positional = chunk.set_axis(range(width), axis=1)
++        for i in self._tracked:
++            self._update_column(self._states[i], positional[i])
++        self.rows += len(chunk)
++
++    def _update_column(self, state: _ColumnState, raw: pd.Series) -> None:
++        cells = pd.Series(raw.to_numpy(dtype=object), dtype=object)
++        absent = cells.isna().to_numpy(dtype=bool)
++        text = cells.where(~absent, "").astype(str) if absent.any() else cells.astype(str)
++        # Parse first, classify the rejects after: pandas parses an ASCII-padded number
++        # exactly like its stripped text, and everything else it rejects - blanks,
++        # placeholders, unicode padding, invalid text - is stripped and classified below,
++        # so the outcome is identical to stripping every cell first, but the string work
++        # only touches the (usually few) cells that did not parse.
++        numbers = _to_floats(pd.to_numeric(text, errors="coerce"))
++        finite = np.isfinite(numbers)
++        if self._numeric_tokens:
++            parsed = np.flatnonzero(finite)
++            sentinel = (
++                text.iloc[parsed].str.strip().str.lower().isin(self._numeric_tokens).to_numpy()
++            )
++            if sentinel.any():
++                finite[parsed[sentinel]] = False
++                state.null_like += int(sentinel.sum())
++                # Already counted: keep them out of the reject classification below.
++                absent_or_token = absent.copy()
++                absent_or_token[parsed[sentinel]] = True
++            else:
++                absent_or_token = absent
++        else:
++            absent_or_token = absent
++        state.missing += int(absent.sum())
++        rest = np.flatnonzero(~finite & ~(absent_or_token & ~absent))
++        if rest.size:
++            stripped = text.iloc[rest].str.strip()
++            rest_text = stripped.to_numpy(dtype=object)
++            rest_absent = absent[rest]
++            blank = (rest_text == "") & ~rest_absent
++            null_like = (
++                ~rest_absent & ~blank & stripped.str.lower().isin(self.null_tokens).to_numpy()
++            )
++            state.missing += int(blank.sum())
++            state.null_like += int(null_like.sum())
++            retry = np.flatnonzero(~(rest_absent | blank | null_like))
++            if retry.size:
++                good = np.zeros(retry.size, dtype=bool)
++                # Only strings that stripping changed can parse differently; for the
++                # rest the first parse already failed, so they are invalid as they are.
++                changed = rest_text[retry] != text.to_numpy(dtype=object)[rest[retry]]
++                if changed.any():
++                    reparsed = _to_floats(
++                        pd.to_numeric(
++                            pd.Series(rest_text[retry[changed]], dtype=object), errors="coerce"
++                        )
++                    )
++                    good[changed] = np.isfinite(reparsed)
++                    where = rest[retry[good]]
++                    if where.size:
++                        if not numbers.flags.writeable:  # may be a view of the parsed Series
++                            numbers = numbers.copy()
++                        numbers[where] = reparsed[np.isfinite(reparsed)]
++                        finite[where] = True
++                state.invalid += int((~good).sum())
++                if not good.all() and len(state.invalid_examples) < INVALID_EXAMPLE_LIMIT:
++                    for value in rest_text[retry[~good]]:
++                        if value not in state.invalid_examples:
++                            state.invalid_examples.append(value)
++                            if len(state.invalid_examples) == INVALID_EXAMPLE_LIMIT:
++                                break
++        state.values.append(numbers[finite])
++        state.rows.append(finite)
++
++    def result(self) -> AnomalyReport:
++        warnings: list[str] = []
++        if self.rows == 0:
++            warnings.append("dataset has a header but no data rows")
++        results: list[ColumnOutliers] = []
++        for position, (name, header, state) in enumerate(
++            zip(self.names, self.headers, self._states, strict=True), start=1
++        ):
++            count = state.values.size
++            parsed = count + state.invalid
++            share = count / parsed if parsed else 0.0
++            if self.requested is None:
++                if count == 0:
++                    continue  # not a numeric column; nothing to scan
++                if share < MOSTLY_NUMERIC:
++                    shown = f"{share:.0%}"
++                    if round(share * 100) >= MOSTLY_NUMERIC * 100:  # 89.6% must not say 90%
++                        shown = f"{math.floor(share * 1000) / 10:.1f}%"
++                    warnings.append(
++                        f"column {name!r} skipped: only {shown} of its values are numeric"
++                    )
++                    continue
++            elif name not in self.requested:
++                continue
++            results.append(self._finish(position, name, header, state))
++        if not results and self.requested is None and self.rows:
++            warnings.append("no numeric columns to analyze")
++        return AnomalyReport(
++            source=self.source,
++            rows=self.rows,
++            factor=self.factor if self.method == "iqr" else None,
++            column_results=results,
++            warnings=warnings,
++            method=self.method,
++            threshold=self.threshold if self.method == "modified_zscore" else None,
++        )
++
++    def _finish(self, position: int, name: str, header: str, state: _ColumnState) -> ColumnOutliers:
++        warnings: list[str] = []
++        if state.invalid:
++            examples = ", ".join(repr(v) for v in state.invalid_examples)
++            warnings.append(f"{state.invalid} non-numeric value(s) ignored (e.g. {examples})")
++        if state.null_like:
++            warnings.append(f"{state.null_like} placeholder value(s) such as NA/null/- ignored")
++        count = state.values.size
++        q1 = q3 = iqr = median = mad = lower = upper = spread = None
++        low = high = 0
++        examples_out: list[dict[str, Any]] = []
++        if count == 0:
++            warnings.append("no numeric values; outliers cannot be computed")
++        elif count < MIN_VALUES:
++            needed = (
++                "meaningful quartiles"
++                if self.method == "iqr"
++                else "a meaningful median and deviation"
++            )
++            warnings.append(
++                f"only {count} numeric value(s); at least {MIN_VALUES} are needed for {needed}"
++            )
++        else:
++            # The only full-size temporaries: one copy of this column, reordered and
++            # (for the modified z-score) rewritten with deviations in place.
++            scratch = state.values.copy()
++            with np.errstate(over="ignore", invalid="ignore"):
++                if self.method == "iqr":
++                    q1, q3 = (
++                        float(q) for q in np.percentile(scratch, [25, 75], overwrite_input=True)
++                    )
++                    spread = iqr = q3 - q1
++                    lower, upper = q1 - self.factor * iqr, q3 + self.factor * iqr
++                    center = q1
++                    zero_note = "interquartile range"
++                else:
++                    median = float(np.median(scratch, overwrite_input=True))
++                    np.subtract(scratch, median, out=scratch)
++                    np.abs(scratch, out=scratch)
++                    spread = mad = float(np.median(scratch, overwrite_input=True))
++                    half = self.threshold * mad / ZSCORE_SCALE
++                    lower, upper = median - half, median + half
++                    center = median
++                    zero_note = "median absolute deviation"
++            del scratch
++            if spread == 0:
++                warnings.append(
++                    f"{zero_note} is 0; every value other than {center:g} is an outlier"
++                )
++            if not (math.isfinite(lower) and math.isfinite(upper)):
++                warnings.append(
++                    "the fence extends beyond the float range; nothing lies outside it "
++                    "on that side (bound reported as null)"
++                )
++            low, high, examples_out = self._scan(state, lower, upper, spread)
++        outliers = low + high
++        return ColumnOutliers(
++            position=position,
++            name=name,
++            header=header,
++            values=count,
++            missing=state.missing,
++            null_like=state.null_like,
++            invalid=state.invalid,
++            q1=_number(q1, spread),
++            q3=_number(q3, spread),
++            iqr=_number(iqr, spread),
++            median=_number(median, spread),
++            mad=_number(mad, spread),
++            lower_bound=_number(lower, spread),
++            upper_bound=_number(upper, spread),
++            outliers=outliers,
++            outlier_percent=_percent(outliers, count),
++            low_outliers=low,
++            high_outliers=high,
++            examples=examples_out,
++            warnings=warnings,
++        )
++
++    def _scan(
++        self, state: _ColumnState, lower: float, upper: float, spread: float
++    ) -> tuple[int, int, list[dict[str, Any]]]:
++        """Count values outside ``[lower, upper]`` and pick the most extreme examples.
++
++        Works block by block and keeps at most :data:`EXAMPLE_LIMIT` candidates, so no
++        full-size mask or distance array is built. Examples are ordered by distance
++        outside the nearest bound, ties by row; values are stored in row order, so a
++        value's ordinal breaks ties exactly like its row number.
++        """
++        low = high = 0
++        candidates: list[tuple[float, int, float]] = []  # (-distance, ordinal, value)
++        offset = 0
++        for block in state.values.views():  # distances may overflow to inf: sorts first
++            with np.errstate(over="ignore", invalid="ignore"):
++                below, above = block < lower, block > upper
++                low += int(below.sum())
++                high += int(above.sum())
++                picked = np.flatnonzero(below | above)
++                if picked.size:
++                    values = block[picked]
++                    distance = np.where(below[picked], lower - values, values - upper)
++                    best = np.lexsort((picked, -distance))[:EXAMPLE_LIMIT]
++                    candidates.extend(
++                        (-float(distance[i]), int(picked[i]) + offset, float(values[i]))
++                        for i in best
++                    )
++                    candidates = sorted(candidates)[:EXAMPLE_LIMIT]
++            offset += block.size
++        rows = state.rows.rows_of([ordinal for _, ordinal, _ in candidates])
++        examples = [
++            {"row": row + self.first_row, "value": _number(value, spread)}
++            for row, (_, _, value) in zip(rows, candidates, strict=True)
++        ]
++        return low, high, examples
++
++
++def detect_outliers_frame(
++    frame: pd.DataFrame,
++    source: str = "<dataframe>",
++    *,
++    factor: float = DEFAULT_IQR_FACTOR,
++    method: str = "iqr",
++    threshold: float = DEFAULT_ZSCORE_THRESHOLD,
++    columns: Iterable[str] | None = None,
++    null_tokens: Iterable[str] | None = None,
++) -> AnomalyReport:
++    """Scan an in-memory DataFrame of raw values for outliers.
++
++    ``method`` selects the fence: ``"iqr"`` (the default, using ``factor``) or
++    ``"modified_zscore"`` (using ``threshold``); the other cutoff is ignored.
++
++    Header text is taken from ``frame.columns`` (duplicate or blank headers are renamed
++    uniquely as in the profiler); cells are treated as text, ``NaN``/``None`` as absent
++    fields. Reported row numbers are 1-based positions in the frame.
++    """
++    detector = OutlierDetector(
++        frame.columns,
++        source,
++        factor=factor,
++        method=method,
++        threshold=threshold,
++        columns=columns,
++        null_tokens=null_tokens,
++    )
++    detector.update(frame)
++    return detector.result()
++
++
++def detect_outliers_csv(
++    path: Path | str,
++    config: Config | None = None,
++    *,
++    factor: float = DEFAULT_IQR_FACTOR,
++    method: str = "iqr",
++    threshold: float = DEFAULT_ZSCORE_THRESHOLD,
++    columns: Iterable[str] | None = None,
++    chunk_size: int | None = None,
++    null_tokens: Iterable[str] | None = None,
++) -> AnomalyReport:
++    """Stream ``path`` with the configured delimiter and encoding and scan for outliers.
++
++    ``chunk_size`` defaults to ``config.csv_chunk_size``, else the profiler's default.
++    Raises :class:`IngestionError` for a missing, empty, undecodable or malformed file,
++    exactly like :func:`~automation_toolkit.processing.profiling.profile_csv`; a
++    header-only file is a valid empty dataset. Reported row numbers are record numbers
++    in the file, header included, matching ``source_row`` elsewhere in the toolkit.
++    Raises :class:`ValueError` for an unknown column name, an unknown ``method`` or a
++    negative ``factor`` or ``threshold``. ``method`` selects the fence: ``"iqr"`` (the
++    default, using ``factor``) or ``"modified_zscore"`` (using ``threshold``).
++    """
++    path = Path(path)
++    config = config or Config()
++    size = check_chunk_size(chunk_size) if chunk_size is not None else config.csv_chunk_size
++    if not path.is_file():
++        raise IngestionError(f"Cannot scan {path}: file not found.")
++    try:
++        with path.open(newline="", encoding=config.csv_encoding) as handle:
++            reader = csv.reader(handle, delimiter=config.csv_delimiter)
++            header = next(reader, None)
++            if header is None or not any(cell.strip() for cell in header):
++                if header is None or not any(any(c.strip() for c in r) for r in reader):
++                    raise IngestionError(
++                        f"Cannot scan {path.name}: the file is empty (no header row)."
++                    )
++                raise IngestionError(
++                    f"Cannot scan {path.name}: line 1 is blank; expected a header row."
++                )
++            detector = OutlierDetector(
++                header,
++                path.name,
++                factor=factor,
++                method=method,
++                threshold=threshold,
++                columns=columns,
++                null_tokens=null_tokens,
++                first_row=2,
++            )
++            effective = size or _default_chunk_size(len(header))
++            # Like profile_csv, a default-size chunk is also capped at about 32 million
++            # characters, so files with very long fields do not hold huge chunks; an
++            # explicit chunk size is a promise about records per chunk and is kept.
++            max_chars = None if size else DEFAULT_CHUNK_CHARS
++            for chunk in _record_chunks(reader, len(header), effective, path.name, max_chars):
++                detector.update(chunk)
++    except IngestionError:
++        raise
++    except (OSError, UnicodeError, LookupError, csv.Error) as exc:
++        raise IngestionError(f"Cannot read CSV {path.name}: {exc}") from exc
++    return detector.result()
+diff --git a/tests/test_anomalies.py b/tests/test_anomalies.py
+new file mode 100644
+index 0000000..ac1f6d2
+--- /dev/null
++++ b/tests/test_anomalies.py
+@@ -0,0 +1,684 @@
++"""IQR outlier detection: bounds, exclusions, column selection and chunk independence."""
++
++import json
++from pathlib import Path
++
++import numpy as np
++import pandas as pd
++import pytest
++
++from automation_toolkit.config import Config
++from automation_toolkit.exceptions import IngestionError
++from automation_toolkit.processing import anomalies
++from automation_toolkit.processing.anomalies import (
++    OutlierDetector,
++    detect_outliers_csv,
++    detect_outliers_frame,
++)
++from automation_toolkit.processing.profiling import _scalar
++
++CHUNKS = [1, 3, 50, 100_000]
++
++
++def csv_of(tmp_path: Path, text: str) -> Path:
++    path = tmp_path / "data.csv"
++    path.write_text(text, encoding="utf-8")
++    return path
++
++
++def scan_values(tmp_path: Path, values, **kwargs):
++    path = csv_of(tmp_path, "x\n" + "\n".join(map(str, values)) + "\n")
++    return detect_outliers_csv(path, **kwargs)
++
++
++# --- detection ------------------------------------------------------------------------
++
++
++def test_detects_known_outliers_with_tukey_bounds(tmp_path) -> None:
++    values = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 1000]
++    report = scan_values(tmp_path, values)
++    [column] = report.column_results
++    q1, q3 = np.percentile(np.array(values, dtype=float), [25, 75])
++    assert column.q1 == q1 and column.q3 == q3
++    assert column.lower_bound == q1 - 1.5 * (q3 - q1)
++    assert column.upper_bound == q3 + 1.5 * (q3 - q1)
++    assert column.outliers == 1 and column.high_outliers == 1 and column.low_outliers == 0
++    assert report.total_outliers == 1
++    # Row numbers are file record numbers including the header: 1000 is record 12.
++    assert column.examples == [{"row": 12, "value": 1000.0}]
++
++
++def test_low_and_high_outliers_and_example_order(tmp_path) -> None:
++    values = [-500, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 300, 900]
++    [column] = scan_values(tmp_path, values).column_results
++    assert column.low_outliers == 1 and column.high_outliers == 2
++    # Most extreme first, by distance outside the nearest bound.
++    assert [e["value"] for e in column.examples] == [900.0, -500.0, 300.0]
++
++
++def test_no_outliers_in_uniform_data(tmp_path) -> None:
++    [column] = scan_values(tmp_path, range(1, 101)).column_results
++    assert column.outliers == 0 and column.examples == []
++    assert column.values == 100
++
++
++def test_factor_zero_flags_everything_outside_the_quartiles(tmp_path) -> None:
++    [column] = scan_values(tmp_path, [1, 2, 3, 4, 5, 6, 7, 8], factor=0).column_results
++    assert (column.lower_bound, column.upper_bound) == (column.q1, column.q3)
++    assert column.outliers == column.low_outliers + column.high_outliers > 0
++
++
++def test_larger_factor_keeps_more_values(tmp_path) -> None:
++    values = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 40]
++    assert scan_values(tmp_path, values, factor=1.5).total_outliers == 1
++    assert scan_values(tmp_path, values, factor=10).total_outliers == 0
++
++
++@pytest.mark.parametrize("factor", [-1, float("nan"), float("inf"), "wide", True])
++def test_invalid_factor_is_rejected(tmp_path, factor) -> None:
++    with pytest.raises(ValueError, match="factor"):
++        scan_values(tmp_path, [1, 2, 3, 4], factor=factor)
++
++
++def test_constant_column_warns_about_zero_iqr(tmp_path) -> None:
++    [column] = scan_values(tmp_path, [5, 5, 5, 5, 5, 7]).column_results
++    assert column.iqr == 0 and column.outliers == 1
++    assert any("interquartile range is 0" in w for w in column.warnings)
++
++
++def test_too_few_values_reports_no_bounds(tmp_path) -> None:
++    [column] = scan_values(tmp_path, [1, 2, 3]).column_results
++    assert column.values == 3 and column.outliers == 0
++    assert column.q1 is None and column.lower_bound is None
++    assert any("at least 4" in w for w in column.warnings)
++
++
++# --- missing, placeholder and invalid values ------------------------------------------
++
++
++def test_missing_and_placeholder_values_are_excluded_and_counted(tmp_path) -> None:
++    path = csv_of(
++        tmp_path,
++        "x\n1\n\n   \n2\nNA\nnull\n3\n4\n",  # one blank row, one whitespace row
++    )
++    [column] = detect_outliers_csv(path).column_results
++    assert column.values == 4
++    assert column.missing == 2
++    assert column.null_like == 2
++    assert column.invalid == 0
++    assert any("placeholder" in w for w in column.warnings)
++
++
++def test_short_rows_count_absent_fields_as_missing(tmp_path) -> None:
++    path = csv_of(tmp_path, "x,y\n1,2\n3\n4,5\n6,7\n8,9\n")
++    report = detect_outliers_csv(path)
++    y = next(c for c in report.column_results if c.name == "y")
++    assert y.values == 4 and y.missing == 1
++
++
++def test_invalid_values_are_ignored_with_a_warning(tmp_path) -> None:
++    [column] = scan_values(tmp_path, [1, 2, "oops", 3, 4, 5, 6, 7, 8, 9, 10]).column_results
++    assert column.values == 10 and column.invalid == 1
++    assert any("non-numeric" in w and "'oops'" in w for w in column.warnings)
++
++
++def test_value_beyond_float_range_counts_as_invalid(tmp_path) -> None:
++    [column] = scan_values(tmp_path, [1, 2, 3, 4, "9" * 400, "1e400"], columns=["x"]).column_results
++    assert column.values == 4 and column.invalid == 2
++
++
++def test_custom_null_tokens_are_placeholders(tmp_path) -> None:
++    [column] = scan_values(tmp_path, [1, 2, 3, 4, "#N/A"], null_tokens=["#N/A"]).column_results
++    assert column.null_like == 1 and column.invalid == 0
++
++
++def test_mostly_non_numeric_column_is_skipped_with_a_warning(tmp_path) -> None:
++    path = csv_of(tmp_path, "x\n1\na\nb\nc\nd\n")
++    report = detect_outliers_csv(path)
++    assert report.column_results == []
++    assert any("skipped" in w and "'x'" in w for w in report.warnings)
++
++
++def test_pure_text_column_is_skipped_silently(tmp_path) -> None:
++    path = csv_of(tmp_path, "name,amount\na,1\nb,2\nc,3\nd,4\ne,500\n")
++    report = detect_outliers_csv(path)
++    assert [c.name for c in report.column_results] == ["amount"]
++    assert report.warnings == []
++
++
++def test_no_numeric_columns_warns(tmp_path) -> None:
++    path = csv_of(tmp_path, "a,b\nx,y\nz,w\n")
++    report = detect_outliers_csv(path)
++    assert report.column_results == []
++    assert any("no numeric columns" in w for w in report.warnings)
++
++
++# --- column selection -----------------------------------------------------------------
++
++
++def test_requested_column_is_analyzed_even_when_mostly_text(tmp_path) -> None:
++    path = csv_of(tmp_path, "x\n1\n2\n3\n4\na\nb\nc\nd\n")
++    report = detect_outliers_csv(path, columns=["x"])
++    [column] = report.column_results
++    assert column.values == 4 and column.invalid == 4
++    assert report.warnings == []
++
++
++def test_requested_column_without_numbers_reports_clearly(tmp_path) -> None:
++    path = csv_of(tmp_path, "name\na\nb\n")
++    [column] = detect_outliers_csv(path, columns=["name"]).column_results
++    assert column.values == 0 and column.outliers == 0
++    assert any("no numeric values" in w for w in column.warnings)
++
++
++def test_unknown_column_raises(tmp_path) -> None:
++    path = csv_of(tmp_path, "x\n1\n")
++    with pytest.raises(ValueError, match="Unknown column.*nope.*available: x"):
++        detect_outliers_csv(path, columns=["nope"])
++
++
++def test_duplicate_headers_get_unique_names(tmp_path) -> None:
++    path = csv_of(tmp_path, "a,a\n1,10\n2,20\n3,30\n4,40\n5,5000\n")
++    report = detect_outliers_csv(path, columns=["a_2"])
++    [column] = report.column_results
++    assert column.name == "a_2" and column.header == "a"
++    assert column.outliers == 1
++
++
++# --- file handling and the frame API --------------------------------------------------
++
++
++def test_missing_file_raises(tmp_path) -> None:
++    with pytest.raises(IngestionError, match="file not found"):
++        detect_outliers_csv(tmp_path / "absent.csv")
++
++
++def test_empty_file_raises(tmp_path) -> None:
++    with pytest.raises(IngestionError, match="empty"):
++        detect_outliers_csv(csv_of(tmp_path, ""))
++
++
++def test_header_only_file_is_an_empty_dataset(tmp_path) -> None:
++    report = detect_outliers_csv(csv_of(tmp_path, "x,y\n"))
++    assert report.rows == 0 and report.column_results == []
++    assert any("no data rows" in w for w in report.warnings)
++
++
++def test_configured_delimiter_is_used(tmp_path) -> None:
++    path = csv_of(tmp_path, "x;y\n1;10\n2;20\n3;30\n4;40\n5;900\n")
++    report = detect_outliers_csv(path, Config(csv_delimiter=";"))
++    assert {c.name for c in report.column_results} == {"x", "y"}
++
++
++def test_frame_api_uses_one_based_rows(tmp_path) -> None:
++    frame = pd.DataFrame({"x": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "100"]})
++    [column] = detect_outliers_frame(frame).column_results
++    assert column.examples == [{"row": 10, "value": 100.0}]
++
++
++@pytest.mark.parametrize("chunk_size", CHUNKS)
++def test_result_is_independent_of_chunk_size(tmp_path, chunk_size) -> None:
++    rng = np.random.default_rng(7)
++    values = [str(v) for v in rng.normal(50, 10, 500).round(3)]
++    values[100] = "999"
++    values[200] = ""
++    values[300] = "NA"
++    values[400] = "bad"
++    path = csv_of(tmp_path, "x\n" + "\n".join(values) + "\n")
++    expected = detect_outliers_csv(path).to_dict()
++    chunked = detect_outliers_csv(path, chunk_size=chunk_size).to_dict()
++    del expected["generated_at"], chunked["generated_at"]
++    assert chunked == expected
++
++
++def test_to_dict_is_json_serializable_and_versioned(tmp_path) -> None:
++    report = scan_values(tmp_path, [1, 2, 3, 4, 5, 1000])
++    data = json.loads(json.dumps(report.to_dict()))
++    assert data["schema_version"] == 2 and data["method"] == "iqr"
++    assert data["summary"] == {"rows": 6, "columns_analyzed": 1, "total_outliers": 1}
++
++
++def test_to_text_names_bounds_outliers_and_warnings(tmp_path) -> None:
++    path = csv_of(tmp_path, "x\n1\n2\n3\n4\n5\nNA\n1000\n")
++    text = detect_outliers_csv(path).to_text()
++    assert "Outlier scan of data.csv" in text
++    assert "1000 (row 8)" in text
++    assert "Warnings:" in text and "placeholder" in text
++
++
++def test_detector_rejects_mismatched_chunk_width() -> None:
++    detector = OutlierDetector(["a", "b"])
++    with pytest.raises(ValueError, match="expected 2"):
++        detector.update(pd.DataFrame({"a": ["1"]}))
++
++
++# --- regression: storage, chunk/block boundaries and row numbers ----------------------
++# The detector stores values in fixed-size blocks and the rows that held them as a bit
++# set. These tests shrink the blocks so every boundary (chunk, block, packed byte) is
++# crossed many times, and compare against a straightforward reference implementation.
++
++
++def reference(values: list[str], factor: float = 1.5, first_row: int = 2) -> dict:
++    """Brute-force IQR result for one column of raw text cells."""
++    rows, numbers = [], []
++    for i, text in enumerate(values):
++        try:
++            number = float(text)
++        except ValueError:
++            continue
++        if np.isfinite(number):
++            rows.append(i + first_row)
++            numbers.append(number)
++    q1, q3 = np.percentile(np.array(numbers), [25, 75])
++    lower, upper = q1 - factor * (q3 - q1), q3 + factor * (q3 - q1)
++    outside = [
++        (lower - v if v < lower else v - upper, r, v)
++        for r, v in zip(rows, numbers, strict=True)
++        if v < lower or v > upper
++    ]
++    outside.sort(key=lambda item: (-item[0], item[1]))
++    return {
++        "low": sum(v < lower for v in numbers),
++        "high": sum(v > upper for v in numbers),
++        "examples": [(r, v) for _, r, v in outside[:5]],
++        "values": len(numbers),
++    }
++
++
++@pytest.fixture
++def tiny_blocks(monkeypatch):
++    monkeypatch.setattr(anomalies, "_BLOCK_MIN", 2)
++    monkeypatch.setattr(anomalies, "_BLOCK_MAX", 5)
++
++
++@pytest.mark.parametrize("chunk_size", [1, 3, 7, 8, 9, 100_000])
++@pytest.mark.parametrize("seed", range(6))
++def test_matches_reference_across_chunk_and_block_boundaries(
++    tmp_path, tiny_blocks, chunk_size, seed
++) -> None:
++    rng = np.random.default_rng(seed)
++    cells = [str(v) for v in rng.normal(0, 1, 120).round(2)]
++    for i in rng.choice(120, 25, replace=False):
++        cells[i] = str(rng.choice(["", "NA", "x", "50", "-40", "7.5"]))
++    expected = reference(cells)
++    [column] = scan_values(tmp_path, cells, chunk_size=chunk_size, columns=["x"]).column_results
++    assert column.values == expected["values"]
++    assert (column.low_outliers, column.high_outliers) == (expected["low"], expected["high"])
++    assert [(e["row"], e["value"]) for e in column.examples] == expected["examples"]
++
++
++def test_example_ties_are_ordered_by_row_across_chunks(tmp_path, tiny_blocks) -> None:
++    values = [str(v) for v in range(1, 41)] + ["500"] * 7
++    for chunk_size in (1, 2, 5, 100):
++        [column] = scan_values(tmp_path, values, chunk_size=chunk_size).column_results
++        assert column.high_outliers == 7
++        # Equal distance: the earliest rows first (records 42..46; record 1 is the header).
++        assert [e["row"] for e in column.examples] == [42, 43, 44, 45, 46]
++
++
++def test_rows_count_blank_lines_and_short_records(tmp_path) -> None:
++    # Record numbers count every record after the header, blank lines and short
++    # records included, matching source_row in the pipeline.
++    path = csv_of(tmp_path, "id,x\na,1\n\nb,2\nc\nd,3\ne,4\nf,5\ng,500\n")
++    for chunk_size in (1, 2, 100):
++        [column] = detect_outliers_csv(path, columns=["x"], chunk_size=chunk_size).column_results
++        assert column.examples == [{"row": 9, "value": 500.0}]
++        assert column.missing == 2  # the blank line and the absent field
++
++
++def test_quoted_line_break_is_one_record(tmp_path) -> None:
++    path = csv_of(tmp_path, 'note,x\n"two\nlines",1\nb,2\nc,3\nd,4\ne,999\n')
++    [column] = detect_outliers_csv(path, columns=["x"]).column_results
++    assert column.examples == [{"row": 6, "value": 999.0}]
++
++
++def test_value_on_the_fence_is_not_an_outlier(tmp_path) -> None:
++    # Q1 3.5, Q3 8.5, IQR 5: the upper fence is exactly 16.
++    [column] = scan_values(tmp_path, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16]).column_results
++    assert column.upper_bound == 16.0 and column.outliers == 0
++    [column] = scan_values(tmp_path, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16.01]).column_results
++    assert column.upper_bound == 16.0 and column.outliers == 1
++
++
++def test_identical_values_have_no_outliers(tmp_path) -> None:
++    [column] = scan_values(tmp_path, [3] * 10).column_results
++    assert column.iqr == 0 and column.outliers == 0
++
++
++def test_one_sided_fence_overflow_is_reported_not_crashing(tmp_path) -> None:
++    """Used to raise TypeError in to_text(): the upper bound overflowed to None."""
++    report = scan_values(tmp_path, ["0", "0", "1e308", "1e308", "1e308", "1e308"])
++    [column] = report.column_results
++    assert column.lower_bound is not None and column.upper_bound is None
++    assert column.outliers == 0
++    assert any("beyond the float range" in w for w in column.warnings)
++    assert ", inf]" in report.to_text()
++
++
++def test_two_sided_fence_overflow_warns(tmp_path) -> None:
++    """Used to return null bounds and no outliers without any explanation."""
++    report = scan_values(tmp_path, ["1e308", "-1e308"] * 3)
++    [column] = report.column_results
++    assert column.lower_bound is None and column.upper_bound is None
++    assert any("beyond the float range" in w for w in column.warnings)
++    assert "[-inf, inf]" in report.to_text()
++
++
++def test_tiny_spread_keeps_enough_precision(tmp_path) -> None:
++    """Used to report Q1, Q3 and both bounds as 0.123457 while flagging an outlier."""
++    values = ["0.1234567891", "0.1234567892", "0.1234567893", "0.1234567894", "0.12345679"]
++    [column] = scan_values(tmp_path, values).column_results
++    assert column.q1 < column.q3 and column.lower_bound < column.upper_bound
++    [example] = column.examples
++    assert example["value"] > column.upper_bound
++
++
++def test_ordinary_numbers_keep_the_previous_rounding(tmp_path) -> None:
++    # Q1 - 1.5 * IQR is -0.20000000000000004 in floats; reported as before.
++    [column] = scan_values(tmp_path, [0.1, 0.1, 0.2, 0.3, 0.3]).column_results
++    assert column.lower_bound == -0.2
++    [column] = scan_values(tmp_path, ["8.8122505"] * 3 + ["1", "2"] * 3).column_results
++    assert column.q3 == _scalar(8.8122505)  # the 6-decimal rounding used before
++
++
++def test_unrequested_columns_are_not_stored(tmp_path) -> None:
++    detector = OutlierDetector(["a", "b"], columns=["b"])
++    detector.update(pd.DataFrame([["1", "2"], ["3", "4"]]))
++    assert detector._states[0].values.size == 0
++    assert detector._states[1].values.size == 2
++
++
++def test_result_can_be_called_repeatedly(tmp_path) -> None:
++    detector = OutlierDetector(["x"])
++    detector.update(pd.DataFrame({"x": [str(v) for v in [1, 2, 3, 4, 5, 6, 100]]}))
++    first, second = detector.result().to_dict(), detector.result().to_dict()
++    del first["generated_at"], second["generated_at"]
++    assert first == second
++    detector.update(pd.DataFrame({"x": ["-200"]}))  # still usable afterwards
++    assert detector.result().column_results[0].low_outliers == 1
++
++
++def test_block_buffer_and_row_bits(tiny_blocks) -> None:
++    buffer = anomalies._Blocks(np.float64)
++    bits = anomalies._RowBits()
++    expected_values, expected_rows, row = [], [], 0
++    rng = np.random.default_rng(3)
++    for size in [0, 1, 3, 7, 8, 13, 2]:
++        mask = rng.random(size) < 0.5
++        values = rng.random(int(mask.sum()))
++        buffer.append(values)
++        bits.append(mask)
++        expected_values.extend(values)
++        expected_rows.extend(np.flatnonzero(mask) + row)
++        row += size
++    assert buffer.copy().tolist() == expected_values
++    assert np.concatenate(buffer.views()).tolist() == expected_values
++    ordinals = list(range(len(expected_rows)))[::-1]
++    assert bits.rows_of(ordinals) == [expected_rows[o] for o in ordinals]
++
++
++# --- regression: parsing fast path, extreme floats and empty datasets ------------------
++# Parsing now tries every cell as-is and only strips/classifies the cells that failed,
++# so these tests pin the classifications and orderings that must not drift.
++
++
++def test_padded_numbers_are_numeric_in_row_order(tmp_path) -> None:
++    # ASCII padding parses directly; the NBSP-padded value takes the strip-and-retry
++    # path and must still land in row order between its neighbours.
++    cells = ["1", " 2 ", "\t3", " 4 ", "5 ", "6", "1000"]
++    for chunk_size in (1, 3, 100):
++        [column] = scan_values(tmp_path, cells, chunk_size=chunk_size).column_results
++        assert column.values == 7 and column.invalid == 0 and column.missing == 0
++        assert column.examples == [{"row": 8, "value": 1000.0}]
++
++
++@pytest.mark.parametrize(
++    "text", ["inf", "-inf", "Infinity", "1e400", "0x10", "1_000", "true", "+-1"]
++)
++def test_classic_invalid_numerics_are_invalid(tmp_path, text) -> None:
++    [column] = scan_values(tmp_path, ["1", "2", "3", "4", text], columns=["x"]).column_results
++    assert column.values == 4 and column.invalid == 1
++    assert any(repr(text) in w for w in column.warnings)
++
++
++def test_decimal_comma_is_invalid(tmp_path) -> None:
++    path = csv_of(tmp_path, 'x\n1\n2\n3\n4\n"1,5"\n')
++    [column] = detect_outliers_csv(path, columns=["x"]).column_results
++    assert column.values == 4 and column.invalid == 1
++    assert any("'1,5'" in w for w in column.warnings)
++
++
++@pytest.mark.parametrize("text", ["nan", "NaN", "NAN"])
++def test_nan_text_is_a_placeholder_not_invalid(tmp_path, text) -> None:
++    [column] = scan_values(tmp_path, ["1", "2", "3", "4", text]).column_results
++    assert column.values == 4 and column.null_like == 1 and column.invalid == 0
++
++
++def test_invalid_examples_keep_row_order_mixing_retried_and_direct(tmp_path) -> None:
++    # "bad1" fails as-is; " x " is retried after stripping and still fails;
++    # the examples must list them in row order regardless of which path found them.
++    cells = ["1", "bad1", " x ", "bad2", "2", "3", "4"]
++    [column] = scan_values(tmp_path, cells, columns=["x"]).column_results
++    assert column.invalid == 3
++    assert any("'bad1', 'x', 'bad2'" in w for w in column.warnings)
++
++
++def test_duplicate_and_blank_headers_are_scanned_separately(tmp_path) -> None:
++    path = csv_of(tmp_path, "a,a,\n1,100,7\n2,200,8\n3,300,9\n4,400,10\n5,9000,11\n")
++    report = detect_outliers_csv(path)
++    by_name = {c.name: c for c in report.column_results}
++    assert set(by_name) == {"a", "a_2", "column_3"}
++    assert by_name["a"].outliers == 0
++    assert by_name["a_2"].outliers == 1 and by_name["a_2"].header == "a"
++    [column] = detect_outliers_csv(path, columns=["column_3"]).column_results
++    assert column.values == 5 and column.header == ""
++
++
++def test_header_only_file_with_requested_column(tmp_path) -> None:
++    report = detect_outliers_csv(csv_of(tmp_path, "x,y\n"), columns=["y"])
++    assert report.rows == 0
++    [column] = report.column_results
++    assert column.values == 0 and column.outliers == 0
++    assert any("no numeric values" in w for w in column.warnings)
++    assert any("no data rows" in w for w in report.warnings)
++
++
++def test_file_of_only_blank_rows(tmp_path) -> None:
++    report = detect_outliers_csv(csv_of(tmp_path, "x\n\n\n\n"))
++    assert report.rows == 3 and report.column_results == []
++    assert any("no numeric columns" in w for w in report.warnings)
++
++
++def test_example_near_float_max_does_not_overflow_rounding(tmp_path) -> None:
++    """Used to raise OverflowError: rounding 1.7e308 to 15 significant digits of its
++    magnitude can round past the float maximum."""
++    cells = ["1e307", "2e307", "3e307", "4e307", "1.7976931348623157e308"]
++    for chunk_size in (1, 100):
++        report = scan_values(tmp_path, cells, chunk_size=chunk_size)
++        [column] = report.column_results
++        assert column.high_outliers == 1
++        [example] = column.examples
++        assert example["value"] == 1.7976931348623157e308
++        json.dumps(report.to_dict())
++        report.to_text()
++
++
++def test_outlier_distance_overflow_is_silent(tmp_path, recwarn) -> None:
++    """Used to emit RuntimeWarning: the distance of -1e308 beyond a 1e308 fence is inf."""
++    import warnings as warnings_module
++
++    path = csv_of(tmp_path, "v\n1e308\n1e308\n1e308\n1e308\n-1e308\n")
++    with warnings_module.catch_warnings():
++        warnings_module.simplefilter("error")
++        [column] = detect_outliers_csv(path).column_results
++    assert column.low_outliers == 1
++    assert column.examples[0]["row"] == 6
++
++
++def test_subnormal_and_negative_zero_values(tmp_path) -> None:
++    [column] = scan_values(tmp_path, ["5e-324", "1e-323", "1.5e-323", "2e-323"]).column_results
++    assert column.values == 4 and column.q1 is not None
++    [column] = scan_values(tmp_path, ["-0.0", "0", "0", "0", "0.0", "5"]).column_results
++    assert column.outliers == 1 and column.examples[0]["value"] == 5.0
++
++
++def test_exponent_and_bare_point_notations_parse(tmp_path) -> None:
++    cells = ["1E5", "+1e5", "1e+5", "10000e1", ".5", "5.", "100000", "9E99"]
++    [column] = scan_values(tmp_path, cells).column_results
++    assert column.values == 8 and column.invalid == 0
++    assert column.high_outliers == 1  # 9E99
++
++
++def test_frame_cells_that_are_not_strings_still_behave_as_text(tmp_path) -> None:
++    # The fast path must not reclassify non-string objects: booleans read as text.
++    frame = pd.DataFrame({"x": [1, 2.5, True, "7", None, 9]}, dtype=object)
++    [column] = detect_outliers_frame(frame, columns=["x"]).column_results
++    assert column.values == 4  # 1, 2.5, "7", 9
++    assert column.invalid == 1  # True -> "True"
++    assert column.missing == 1  # None
++
++
++# --- regression: numeric placeholder tokens and the threshold message -----------------
++
++
++@pytest.mark.parametrize("chunk_size", [1, 2, 5, 100_000])
++def test_numeric_null_token_is_a_placeholder(tmp_path, chunk_size) -> None:
++    """Used to be ignored: the parse-first fast path accepted -999 as a number, which
++    then shifted the quartiles. Matching is on the stripped text, as for other tokens."""
++    cells = ["1", "2", "3", "4", "5", "-999", " -999 ", "-999.0"]
++    [column] = scan_values(
++        tmp_path, cells, chunk_size=chunk_size, null_tokens=["-999"]
++    ).column_results
++    assert column.null_like == 2 and column.values == 6 and column.invalid == 0
++    assert column.examples == [{"row": 9, "value": -999.0}]  # "-999.0" is not the token
++    assert any("2 placeholder" in w for w in column.warnings)
++
++
++def test_numeric_null_token_in_cli(tmp_path, capsys) -> None:
++    from automation_toolkit.anomaly_cli import main
++
++    path = csv_of(tmp_path, "x\n" + "".join(f"{i}\n" for i in range(1, 21)) + "-999\n")
++    assert main(["--input", str(path), "--strict", "--null-token", "-999"]) == 0
++    assert main(["--input", str(path), "--strict"]) == 2  # without it, -999 is an outlier
++
++
++def test_skip_message_never_rounds_up_to_the_threshold(tmp_path) -> None:
++    """Used to say "only 90% ... numeric" for a column skipped at 89.6%."""
++    frame = pd.DataFrame({"x": [str(i) for i in range(896)] + ["t"] * 104})
++    report = detect_outliers_frame(frame)
++    assert report.column_results == []
++    assert any("only 89.6% of its values" in w for w in report.warnings)
++    frame = pd.DataFrame({"x": ["1", "a", "b"]})
++    assert any("only 33% of its values" in w for w in detect_outliers_frame(frame).warnings)
++
++
++# --- modified z-score method ------------------------------------------------------------
++
++
++def test_modified_zscore_hand_computed(tmp_path) -> None:
++    # median 6, MAD 3: the fence is 6 +/- 3.5 * 3 / 0.6745 and only 100 lies outside.
++    cells = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100]
++    report = scan_values(tmp_path, cells, method="modified_zscore")
++    [column] = report.column_results
++    assert (column.median, column.mad) == (6.0, 3.0)
++    assert column.lower_bound == pytest.approx(6 - 3.5 * 3 / 0.6745, abs=1e-6)
++    assert column.upper_bound == pytest.approx(6 + 3.5 * 3 / 0.6745, abs=1e-6)
++    assert column.q1 is None and column.q3 is None and column.iqr is None
++    assert column.outliers == 1 and column.examples == [{"row": 12, "value": 100.0}]
++    data = report.to_dict()
++    assert data["method"] == "modified_zscore"
++    assert data["threshold"] == 3.5 and data["factor"] is None
++    assert "modified z-score threshold 3.5" in report.to_text()
++
++
++def test_iqr_stays_the_default_and_reports_no_median(tmp_path) -> None:
++    report = scan_values(tmp_path, [1, 2, 3, 4, 5, 100])
++    [column] = report.column_results
++    assert column.median is None and column.mad is None and column.q1 is not None
++    data = report.to_dict()
++    assert data["method"] == "iqr" and data["factor"] == 1.5 and data["threshold"] is None
++
++
++def test_modified_zscore_resists_heavy_contamination(tmp_path) -> None:
++    # Two thirds extreme values swallow the quartile fence but not the median fence.
++    cells = [str(v) for v in range(100)] + ["1e9"] * 66
++    assert scan_values(tmp_path, cells).total_outliers == 0
++    report = scan_values(tmp_path, cells, method="modified_zscore")
++    assert report.total_outliers == 66
++
++
++def test_modified_zscore_threshold_widens_the_fence(tmp_path) -> None:
++    cells = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100]
++    assert scan_values(tmp_path, cells, method="modified_zscore").total_outliers == 1
++    wide = scan_values(tmp_path, cells, method="modified_zscore", threshold=25)
++    assert wide.total_outliers == 0
++    tight = scan_values(tmp_path, cells, method="modified_zscore", threshold=0)
++    [column] = tight.column_results
++    assert (column.lower_bound, column.upper_bound) == (6.0, 6.0)
++    assert column.outliers == 10  # everything except the median itself
++
++
++def test_zero_mad_flags_deviants_with_a_warning(tmp_path) -> None:
++    [column] = scan_values(tmp_path, [5, 5, 5, 5, 7], method="modified_zscore").column_results
++    assert column.mad == 0 and column.outliers == 1
++    assert any("median absolute deviation is 0" in w for w in column.warnings)
++
++
++@pytest.mark.parametrize("chunk_size", [1, 2, 7, 100_000])
++def test_modified_zscore_is_chunk_size_independent(tmp_path, tiny_blocks, chunk_size) -> None:
++    rng = np.random.default_rng(11)
++    cells = [str(v) for v in rng.normal(50, 10, 300).round(3)]
++    cells[50], cells[150], cells[250] = "", "NA", "bad"
++    cells[200] = "999"
++    expected = scan_values(tmp_path, cells, method="modified_zscore").to_dict()
++    got = scan_values(tmp_path, cells, method="modified_zscore", chunk_size=chunk_size).to_dict()
++    del expected["generated_at"], got["generated_at"]
++    assert got == expected
++
++
++def test_modified_zscore_excludes_missing_placeholder_invalid(tmp_path) -> None:
++    cells = ["1", "2", "3", "4", "5", "", "NA", "bad", " 6 "]
++    [column] = scan_values(tmp_path, cells, method="modified_zscore", columns=["x"]).column_results
++    assert (column.values, column.missing, column.null_like, column.invalid) == (6, 1, 1, 1)
++
++
++def test_modified_zscore_median_overflow_is_warned_not_crashing(tmp_path) -> None:
++    # numpy averages the middle pair: (1e308 + 1.7e308) / 2 overflows to inf.
++    report = scan_values(
++        tmp_path, ["1e308", "1e308", "1.7e308", "1.7e308"], method="modified_zscore"
++    )
++    [column] = report.column_results
++    assert column.median is None and column.outliers == 0
++    assert any("beyond the float range" in w for w in column.warnings)
++    json.dumps(report.to_dict())
++    report.to_text()
++
++
++def test_modified_zscore_too_few_values(tmp_path) -> None:
++    [column] = scan_values(tmp_path, [1, 2, 3], method="modified_zscore").column_results
++    assert column.median is None and column.outliers == 0
++    assert any("a meaningful median and deviation" in w for w in column.warnings)
++
++
++def test_unknown_method_and_bad_threshold_raise(tmp_path) -> None:
++    with pytest.raises(ValueError, match="method must be one of: iqr, modified_zscore"):
++        scan_values(tmp_path, [1, 2, 3, 4], method="zscore")
++    for threshold in (-1, float("nan"), "big", True):
++        with pytest.raises(ValueError, match="threshold"):
++            scan_values(tmp_path, [1, 2, 3, 4], method="modified_zscore", threshold=threshold)
++
++
++def test_modified_zscore_frame_api_and_duplicate_headers(tmp_path) -> None:
++    frame = pd.DataFrame([["1", "10"], ["2", "20"], ["3", "30"], ["4", "40"], ["5", "9000"]])
++    frame.columns = ["a", "a"]
++    report = detect_outliers_frame(frame, method="modified_zscore")
++    by_name = {c.name: c for c in report.column_results}
++    assert by_name["a"].outliers == 0 and by_name["a_2"].outliers == 1
++    assert by_name["a_2"].examples == [{"row": 5, "value": 9000.0}]
++
++
++def test_modified_zscore_header_only_dataset(tmp_path) -> None:
++    report = detect_outliers_csv(csv_of(tmp_path, "x\n"), method="modified_zscore", columns=["x"])
++    assert report.rows == 0 and report.to_dict()["method"] == "modified_zscore"
++    [column] = report.column_results
++    assert any("no numeric values" in w for w in column.warnings)
+diff --git a/tests/test_anomaly_cli.py b/tests/test_anomaly_cli.py
+new file mode 100644
+index 0000000..0dc563c
+--- /dev/null
++++ b/tests/test_anomaly_cli.py
+@@ -0,0 +1,142 @@
++"""The automation-toolkit-anomalies command: output, JSON export and exit codes."""
++
++import json
++from pathlib import Path
++
++import pytest
++
++from automation_toolkit.anomaly_cli import EXIT_FAILED, EXIT_OK, EXIT_OUTLIERS, main
++
++
++def csv_of(tmp_path: Path, text: str, name: str = "data.csv") -> Path:
++    path = tmp_path / name
++    path.write_text(text, encoding="utf-8")
++    return path
++
++
++OUTLIER_CSV = "x\n1\n2\n3\n4\n5\n6\n7\n8\n9\n1000\n"
++CLEAN_CSV = "x\n1\n2\n3\n4\n5\n"
++
++
++def test_scan_prints_summary_and_exits_zero(tmp_path, capsys) -> None:
++    path = csv_of(tmp_path, OUTLIER_CSV)
++    assert main(["--input", str(path)]) == EXIT_OK
++    out = capsys.readouterr().out
++    assert "Outlier scan of data.csv" in out
++    assert "1000" in out
++
++
++def test_json_export_writes_one_object_for_one_input(tmp_path, capsys) -> None:
++    path = csv_of(tmp_path, OUTLIER_CSV)
++    target = tmp_path / "out" / "anomalies.json"
++    assert main(["--input", str(path), "--json", str(target)]) == EXIT_OK
++    data = json.loads(target.read_text(encoding="utf-8"))
++    assert data["source"] == "data.csv"
++    assert data["summary"]["total_outliers"] == 1
++    assert str(target.resolve()) in capsys.readouterr().out
++
++
++def test_json_export_writes_a_list_for_several_inputs(tmp_path) -> None:
++    first = csv_of(tmp_path, OUTLIER_CSV, "a.csv")
++    second = csv_of(tmp_path, CLEAN_CSV, "b.csv")
++    target = tmp_path / "anomalies.json"
++    assert main(["--input", str(first), str(second), "--json", str(target)]) == EXIT_OK
++    data = json.loads(target.read_text(encoding="utf-8"))
++    assert [entry["source"] for entry in data] == ["a.csv", "b.csv"]
++
++
++def test_strict_exits_two_only_when_outliers_were_found(tmp_path) -> None:
++    dirty = csv_of(tmp_path, OUTLIER_CSV, "dirty.csv")
++    clean = csv_of(tmp_path, CLEAN_CSV, "clean.csv")
++    assert main(["--input", str(clean), "--strict"]) == EXIT_OK
++    assert main(["--input", str(dirty), "--strict"]) == EXIT_OUTLIERS
++
++
++def test_missing_file_fails_but_other_inputs_are_still_scanned(tmp_path, capsys, caplog) -> None:
++    path = csv_of(tmp_path, OUTLIER_CSV)
++    assert main(["--input", str(tmp_path / "absent.csv"), str(path)]) == EXIT_FAILED
++    assert "file not found" in caplog.text
++    assert "Outlier scan of data.csv" in capsys.readouterr().out
++
++
++def test_unknown_column_fails(tmp_path, caplog) -> None:
++    path = csv_of(tmp_path, CLEAN_CSV)
++    assert main(["--input", str(path), "--column", "nope"]) == EXIT_FAILED
++    assert "Unknown column" in caplog.text
++
++
++def test_negative_factor_fails(tmp_path, caplog) -> None:
++    path = csv_of(tmp_path, OUTLIER_CSV)
++    assert main(["--input", str(path), "--factor", "-1"]) == EXIT_FAILED
++    assert "factor" in caplog.text
++
++
++def test_factor_option_changes_the_fence(tmp_path) -> None:
++    path = csv_of(tmp_path, "x\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n40\n")
++    assert main(["--input", str(path), "--strict"]) == EXIT_OUTLIERS
++    assert main(["--input", str(path), "--strict", "--factor", "10"]) == EXIT_OK
++
++
++def test_delimiter_override_and_column_selection(tmp_path, capsys) -> None:
++    path = csv_of(tmp_path, "x;note\n1;a\n2;b\n3;c\n4;d\n900;e\n")
++    assert main(["--input", str(path), "--delimiter", ";", "--column", "x"]) == EXIT_OK
++    assert "900" in capsys.readouterr().out
++
++
++def test_invalid_chunk_size_fails(tmp_path, caplog) -> None:
++    path = csv_of(tmp_path, CLEAN_CSV)
++    assert main(["--input", str(path), "--chunk-size", "0"]) == EXIT_FAILED
++    assert "csv_chunk_size" in caplog.text
++
++
++def test_unwritable_json_target_fails(tmp_path, caplog) -> None:
++    path = csv_of(tmp_path, OUTLIER_CSV)
++    blocker = tmp_path / "blocker"
++    blocker.write_text("file, not a directory", encoding="utf-8")
++    target = blocker / "sub" / "anomalies.json"
++    assert main(["--input", str(path), "--json", str(target)]) == EXIT_FAILED
++    assert "Cannot write" in caplog.text
++
++
++def test_method_modified_zscore(tmp_path, capsys) -> None:
++    path = csv_of(tmp_path, "x\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n100\n")
++    assert main(["--input", str(path), "--method", "modified_zscore"]) == EXIT_OK
++    out = capsys.readouterr().out
++    assert "modified z-score threshold 3.5" in out and "100 (row 12)" in out
++
++
++def test_threshold_option_changes_the_cutoff(tmp_path) -> None:
++    path = csv_of(tmp_path, "x\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n100\n")
++    strict = ["--input", str(path), "--method", "modified_zscore", "--strict"]
++    assert main(strict) == EXIT_OUTLIERS
++    assert main([*strict, "--threshold", "25"]) == EXIT_OK
++
++
++def test_mismatched_cutoff_options_fail(tmp_path, caplog) -> None:
++    path = csv_of(tmp_path, CLEAN_CSV)
++    assert (
++        main(["--input", str(path), "--method", "modified_zscore", "--factor", "2"]) == EXIT_FAILED
++    )
++    assert "--factor applies to --method iqr" in caplog.text
++    caplog.clear()
++    assert main(["--input", str(path), "--threshold", "2"]) == EXIT_FAILED
++    assert "--threshold applies to --method modified_zscore" in caplog.text
++
++
++def test_invalid_method_is_an_argparse_error(tmp_path, capsys) -> None:
++    path = csv_of(tmp_path, CLEAN_CSV)
++    with pytest.raises(SystemExit) as info:
++        main(["--input", str(path), "--method", "bogus"])
++    assert info.value.code == 2
++    assert "invalid choice" in capsys.readouterr().err
++
++
++def test_json_export_carries_the_method(tmp_path) -> None:
++    path = csv_of(tmp_path, OUTLIER_CSV)
++    target = tmp_path / "z.json"
++    args = ["--input", str(path), "--method", "modified_zscore", "--json", str(target)]
++    assert main([*args, "--threshold", "10"]) == EXIT_OK
++    data = json.loads(target.read_text(encoding="utf-8"))
++    assert data["method"] == "modified_zscore" and data["threshold"] == 10.0
++    assert data["factor"] is None
++    assert data["columns"][0]["median"] is not None and data["columns"][0]["q1"] is None

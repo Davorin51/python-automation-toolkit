@@ -24,6 +24,7 @@ automation-toolkit = "automation_toolkit.cli:main"
 automation-toolkit-gui = "automation_toolkit.gui.app:main"
 automation-toolkit-workflow = "automation_toolkit.workflow_cli:main"
 automation-toolkit-profile = "automation_toolkit.profile_cli:main"
+automation-toolkit-anomalies = "automation_toolkit.anomaly_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

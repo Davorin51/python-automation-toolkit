@@ -454,6 +454,134 @@ for chunk in chunks:
 profile = profiler.result()
 ```
 
+## Detecting outliers in numeric columns
+
+`automation-toolkit-anomalies` (or `python -m automation_toolkit.anomaly_cli`) scans
+the numeric columns of any CSV for outliers. Like the profiler, it does not require
+the sales schema and never rejects rows; it only reports. Two methods are available
+(`--method`, default `iqr`), and both report a "normal range" fence and every value
+outside it:
+
+- `iqr`: the first and third quartile and the Tukey fence
+  `[Q1 - factor * IQR, Q3 + factor * IQR]`.
+- `modified_zscore`: the median and the median absolute deviation (MAD); a value is an
+  outlier when its modified z-score `0.6745 * (x - median) / MAD` exceeds
+  `--threshold`, i.e. it lies outside `median +/- threshold * MAD / 0.6745`.
+
+```bash
+automation-toolkit-anomalies --input examples/sample_sales_dirty.csv
+automation-toolkit-anomalies --input export.csv --json reports/anomalies.json --strict
+# A wider fence, only one column, semicolon-delimited input
+automation-toolkit-anomalies --input export.csv --delimiter ";" --factor 3 --column unit_price
+# The modified z-score instead of the quartile fence, with a stricter cutoff
+automation-toolkit-anomalies --input export.csv --method modified_zscore --threshold 3
+```
+
+The delimiter, encoding and chunk size come from `--config` (same YAML as the
+pipeline) and can be overridden with `--delimiter`, `--encoding` and `--chunk-size`.
+`--factor` sets the IQR fence multiplier (default 1.5, the usual convention; 3 is a
+common choice for flagging only extreme values; 0 flags everything outside the
+quartiles). `--threshold` sets the modified z-score cutoff (default 3.5, the usual
+convention from Iglewicz & Hoaglin; 0 flags everything except the median). Each
+option belongs to its method; combining `--factor` with `--method modified_zscore`
+(or `--threshold` with `iqr`) is an error. The result lists, per column, the values
+used, the method's measures (quartiles and IQR, or median and MAD), the fence, the
+low/high outlier counts and percentage, and up to five of the most extreme outliers
+with their row numbers (record numbers in the file, header included, matching
+`source_row` elsewhere).
+
+Both methods exclude the same cells, run on the same streamed chunks and report the
+same shape of result; they differ only in where the fence sits. The quartile fence
+breaks down when more than a quarter of the values are extreme (the quartiles
+themselves move into the contamination), while the median fence tolerates up to half;
+on the other hand `modified_zscore` is stricter on clean, skewed data. A MAD of 0 (at
+least half the values identical) flags every differing value, with a warning, exactly
+like an IQR of 0. Columns with fewer than four numeric values report no fence under
+either method.
+
+Missing and invalid values never abort the scan; they are excluded from the
+calculation and reported:
+
+- Missing cells - empty, whitespace-only, or absent because the record was short -
+  are counted per column as `missing`.
+- Placeholder text such as `NA`, `N/A`, `null`, `None` or `-` is counted as
+  `null_like`, with a warning; `--null-token TEXT` (repeatable, case-insensitive)
+  adds your own. A numeric sentinel works too (`--null-token -999`): cells whose
+  stripped text equals it are placeholders, while `-999.0` stays a number.
+- Any other non-numeric text is counted as `invalid`, with a warning naming up to
+  three examples. A value beyond the float range (for example `1e400`) also counts
+  as invalid. Numbers are compared as 64-bit floats, so integers beyond 2**53 lose
+  precision here (unlike in the profiler's exact statistics).
+
+Without `--column`, a column is scanned when at least 90% of its parsed (non-missing,
+non-placeholder) values are numeric; below that it is skipped with a warning naming
+the numeric share, and a column with no numeric values at all is skipped silently.
+`--column NAME` (repeatable) restricts the scan to the named columns and analyzes
+them even when they are mostly non-numeric; an unknown name is an error. Column
+names are the profiler's unique display names, so duplicated headers are `a`,
+`a_2`, ... and blank headers `column_<position>`. A column with fewer than four
+numeric values reports no bounds, with a warning, because quartiles of so few values
+say little. A constant column (IQR of 0) is flagged, since every deviating value then
+counts as an outlier.
+
+Quartiles use linear interpolation between the two nearest values (NumPy's default
+method, the same as Excel's `QUARTILE.INC`). A value exactly on a fence is not an
+outlier. The reported "most extreme" examples are ordered by distance outside the
+nearest fence, ties by row number. Quartiles, bounds and values are rounded like the
+profiler's statistics (6 decimals, at least 6 significant digits); when the IQR is
+below 0.001 more decimals are kept so it shows three significant digits. A fence that
+exceeds the float range (data near `1e308`) is `null` in JSON, `inf` in the text
+report, and produces a warning: nothing can lie outside it on that side.
+
+Files are streamed in chunks exactly like the profiler, and every reported number,
+row number and example is independent of the chunk size. Without an explicit
+`--chunk-size`, chunks are capped at 50,000 records and about 32 million characters
+(like the profiler), so files with very long fields use smaller chunks. Memory is one
+chunk plus, for each scanned column, 8 bytes per numeric value and 1 bit per row; with
+`--column` the other columns are not stored at all. Computing the quartiles makes one
+temporary copy of one column's values at a time. On 1,000,000 rows with three numeric
+columns the traced peak is about 50 MB (34 MB with a single `--column`), so a column
+of N numbers needs roughly 16 x N bytes at its peak; the same scan takes about 1.4
+seconds (one Linux x86_64 measurement, not a guarantee). Cells are parsed first and
+only the failures are stripped and classified, so clean numeric data is scanned at
+full speed and messy data costs only in proportion to its messy cells.
+
+Values at the edge of the float range are safe: an outlier at `1.7e308` is reported
+unrounded (rounding it could exceed the largest float), a distance that overflows
+counts as infinite and ranks first among the examples, and subnormal values such as
+`5e-324` are ordinary numbers.
+
+| Exit status | Meaning |
+| --- | --- |
+| 0 | Every input was scanned |
+| 2 | With `--strict`: every input was scanned but at least one contains outliers |
+| 1 | An input is missing, empty, undecodable or malformed, or the options are invalid (unknown column, negative factor or threshold, a cutoff option combined with the other method); readable inputs are still scanned |
+
+`--json PATH` writes one result object (`schema_version` 2: `source`, `method`,
+`factor`, `threshold`, `summary`, `warnings`, `columns`), or a list of them for
+several inputs. The method that is not in use reports `null` for its keys: under
+`iqr` each column fills `q1`/`q3`/`iqr` and leaves `median`/`mad` null, and the
+reverse under `modified_zscore`; `lower_bound`/`upper_bound`, counts and examples
+mean the same under both. (Schema version 1 lacked `threshold`, `median` and `mad`;
+everything it had is unchanged.) From Python:
+
+```python
+from automation_toolkit.processing.anomalies import detect_outliers_csv, detect_outliers_frame
+
+report = detect_outliers_csv("export.csv", factor=1.5, columns=["unit_price"])
+robust = detect_outliers_csv("export.csv", method="modified_zscore", threshold=3.5)
+print(report.to_text())
+data = report.to_dict()
+
+# Or feed your own chunks (columns in header order, None = absent field)
+from automation_toolkit.processing.anomalies import OutlierDetector
+
+detector = OutlierDetector(["id", "amount"], source="stream")
+for chunk in chunks:
+    detector.update(chunk)
+report = detector.result()
+```
+
 ## Outputs and exit status
 
 The console prints the completed run directory. `all` writes:
